@@ -104,3 +104,12 @@ def test_resend_copies_an_earlier_file_byte_for_byte(tmp_path):
     assert resent[0].read_bytes() in originals.values()
     rows = read_log(tmp_path / "generator_log.csv")
     assert any(r["resend_of"] for r in rows)
+
+
+def test_names_stay_unique_after_the_agent_moves_files(tmp_path):
+    first = run_fast(tmp_path, 1)[0]
+    processed = tmp_path / "processed"
+    processed.mkdir()
+    first.replace(processed / first.name)  # what the agent does after landing
+    later = run_fast(tmp_path, 2)  # same minute, so the same timestamp
+    assert first.name not in {p.name for p in later}

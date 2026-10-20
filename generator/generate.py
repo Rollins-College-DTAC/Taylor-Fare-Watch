@@ -51,13 +51,14 @@ JSON_KEYS = {
 }
 
 
-def unique_path(folder: Path, stem: str, suffix: str) -> Path:
-    path = folder / f"{stem}{suffix}"
+def unique_path(folder: Path, stem: str, suffix: str, also_taken_in: tuple[Path, ...] = ()) -> Path:
+    """A name not used in `folder` or in any folder the agent may already have moved files to."""
+    name = f"{stem}{suffix}"
     n = 2
-    while path.exists():
-        path = folder / f"{stem}-{n}{suffix}"
+    while any((d / name).exists() for d in (folder, *also_taken_in)):
+        name = f"{stem}-{n}{suffix}"
         n += 1
-    return path
+    return folder / name
 
 
 def write_atomic(path: Path, text: str) -> None:
@@ -121,11 +122,12 @@ def write_one(
     inbox.mkdir(parents=True, exist_ok=True)
     stamp = now.strftime("%Y%m%d-%H%M")
     earlier = earlier_imports(inbox, processed)
+    taken = (processed, processed.with_name("quarantine"))  # the agent moves files to these
     written = []
 
     batch = build_import(seq, now, rng, fake)
     fmt = "csv" if seq % 2 == 0 else "json"
-    path = unique_path(inbox, f"{FILE_PREFIX}_{stamp}", f".{fmt}")
+    path = unique_path(inbox, f"{FILE_PREFIX}_{stamp}", f".{fmt}", taken)
     write_atomic(path, render_csv(batch) if fmt == "csv" else render_json(batch, now))
     append_log(log_path, {
         **batch.truth, "file_name": path.name, "format": fmt,
@@ -137,7 +139,7 @@ def write_one(
 
     if earlier and rng.random() < resend_rate:
         source = rng.choice(earlier)
-        copy = unique_path(inbox, f"{FILE_PREFIX}_{stamp}_resend", source.suffix)
+        copy = unique_path(inbox, f"{FILE_PREFIX}_{stamp}_resend", source.suffix, taken)
         part = copy.with_name(copy.name + ".part")
         shutil.copyfile(source, part)
         part.replace(copy)

@@ -30,8 +30,8 @@ unusual prices.
 | # | Milestone | Done when | Status |
 |---|---|---|---|
 | 1 | Repo, environment, data generator (one import per minute) | A new file lands every minute and its name is logged | Done 2026-10-20 |
-| 2 | ETL loop: detect, hash, land in TinyDB, run log, SQL logging | A duplicate file is skipped and shown in the log | **Current — not started** |
-| 3 | Expert models: MoE router, Jev classification, Claude extraction, review queue, gold set | 50 hand-labeled records scored; model usage logged | Pending |
+| 2 | ETL loop: detect, hash, land in TinyDB, run log, SQL logging | A duplicate file is skipped and shown in the log | Done 2026-10-20 |
+| 3 | Expert models: MoE router, Jev classification, Claude extraction, review queue, gold set | 50 hand-labeled records scored; model usage logged | **Current — not started** |
 | 4 | Clean into SQLite, statistics, forecast, trigger and action | The trigger fires on a seeded anomaly in a test | Pending |
 | 5 | Streamlit dashboard: live flow chart, step panels with SQL and formulas, MoE view | An import is held and released on screen with its file name, SQL and formula | Pending |
 | 6 | Cloud: GitHub Actions pipeline, data branch, Streamlit Community Cloud, Claude Routine | The public app updates every minute during a demo run | Pending |
@@ -48,6 +48,17 @@ dependency the course references don't name.
 - Install deps: `python -m uv sync` (uv was installed with `pip install --user uv`, so call it as `python -m uv`)
 - Tests: `python -m uv run pytest -q`
 - Generator: `python -m uv run python -m generator.generate --minutes 3` (add `--seed N` to make it reproducible, `--interval S` to change the 60-second spacing)
+- Agent: `python -m uv run python -m agent.main` (scans every 15 s; `--minutes N` to stop, `--once` for a single scan)
+- Logs: `python -m uv run python scripts/show_log.py -n 20`
+
+## Agent facts
+
+- `agent/config.py`: paths come from env vars FAREWATCH_INBOX, _PROCESSED, _QUARANTINE, _DATA (default `data/`); scan interval FAREWATCH_SCAN_SECONDS. `Paths.under(root)` is for tests.
+- `agent/db.py`: SQLite `data/analytics.sqlite` (WAL, autocommit). All six course log tables plus `seen_files` (hash to first file name). Agent SQL goes only through `RunContext.run_sql(step, sql, params)`, which logs to sql_log; log-table writes use `write_log` and are not logged.
+- `agent/runlog.py`: `with step(ctx, "land") as s:` writes a `running` run_log row, then updates it on finish. `open_incident()` writes incident_log.
+- `agent/etl.py`: Detect (hash, skip if seen, then move to processed/) and Land (raw records into TinyDB `data/raw.json`, table `quotes_raw`, each as `{run_id, file_name, file_sha256, source_format, feed, row_index, landed_at, record}`). Unparseable files go to quarantine/ and open a `failure` incident.
+- Timestamps in the logs are UTC; console prints are local time.
+- Next steps to add in etl.py: Redact, Route, Classify, Extract, Validate (Milestone 3), then Load, Decide, Act (Milestone 4).
 
 ## Generator facts (needed by later milestones)
 
@@ -64,3 +75,4 @@ dependency the course references don't name.
 
 - 2026-10-20: Project decisions recorded.
 - 2026-10-20: Milestone 1 done. Generator and 9 passing tests; 3-minute live run landed one file per minute.
+- 2026-10-20: Milestone 2 done. Detect and Land, log tables, run_sql, show_log; 16 tests. The live demo skipped a re-sent copy by hash. Fixed a generator bug where a file name could repeat after the agent moved the original (only with imports under 60 s apart). The local demo data from before the fix has two imports logged as `farewatch_20261020-1941.json`; the second was saved as `processed/...-1941-2.json`. It's harmless and can be reset by deleting data/, processed/ and generator_log.csv.
