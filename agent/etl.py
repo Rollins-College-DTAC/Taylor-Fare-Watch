@@ -26,6 +26,7 @@ from tinydb import TinyDB
 
 from agent.config import Paths, Settings
 from agent.db import RunContext, now_utc, write_log
+from agent.decide import decide_and_act
 from agent.experts import claude_expert
 from agent.redact import redact_record
 from agent.reference import field
@@ -162,7 +163,7 @@ def extract_step(
 def validate_step(
     ctx: RunContext, raw_db: TinyDB, redacted: list[dict], classifications: list,
     extractions: dict[int, "claude_expert.ExtractionResult"], injected: set[int],
-) -> tuple[int, int]:
+) -> list[dict]:
     """Collect Classify and Extract outcomes: ready rows go on to Load, the rest are quarantined."""
     with step(ctx, "validate") as s:
         validated, quarantined = [], []
@@ -193,14 +194,58 @@ def validate_step(
         s.rows_out = len(validated)
         s.rows_rejected = len(quarantined)
         s.message = f"validated {len(validated)} of {len(redacted)} record(s); {len(quarantined)} quarantined"
-    return len(validated), len(quarantined)
+    return validated
+
+
+def _as_int_or_none(value) -> int | None:
+    return None if value is None else int(bool(value))
+
+
+def load_step(ctx: RunContext, settings: Settings, validated: list[dict]) -> float | None:
+    """Clean, typed rows into SQLite silver (`quotes`), plus one `imports` row for Decide."""
+    with step(ctx, "load") as s:
+        nonstop_fares_usd = []
+        for v in validated:
+            e, c = v["extraction"], v["classification"]
+            amount, currency = e["fare_amount"], e["fare_currency"]
+            usd = amount / settings.mxn_per_usd if (amount is not None and currency == "MXN") else amount
+            ctx.run_sql(
+                "load",
+                "INSERT INTO quotes (run_id, file_name, row_index, quote_id, carrier_code, flight_number, "
+                "origin, destination, depart_date, return_date, fare_amount_usd, fare_currency_quoted, "
+                "cabin, seats_left, nonstop, checked_bag_included, refundable, price_hold_hours, "
+                "category, urgency, injection, extract_outcome, loaded_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    ctx.run_id, ctx.file_name, v["row_index"], e["quote_id"], e["carrier_code"], e["flight_number"],
+                    e["origin"], e["destination"], e["depart_date"], e["return_date"], usd, currency,
+                    e["cabin"], e["seats_left"], _as_int_or_none(e["nonstop"]),
+                    _as_int_or_none(e["checked_bag_included"]), _as_int_or_none(e["refundable"]),
+                    e["price_hold_hours"], c["category"], c["urgency"], int(c["injection"]),
+                    v["extract_outcome"], now_utc(),
+                ),
+            )
+            if e["nonstop"] and usd is not None:
+                nonstop_fares_usd.append(usd)
+
+        cheapest = min(nonstop_fares_usd) if nonstop_fares_usd else None
+        ctx.run_sql(
+            "load",
+            "INSERT INTO imports (run_id, file_name, landed_at, cheapest_nonstop_usd, published, held) "
+            "VALUES (?, ?, ?, ?, 0, 0)",
+            (ctx.run_id, ctx.file_name, now_utc(), cheapest),
+        )
+        s.rows_in = s.rows_out = len(validated)
+        s.message = (f"loaded {len(validated)} clean quote(s); cheapest nonstop fare "
+                     + (f"${cheapest:.2f}" if cheapest is not None else "unknown (no valid nonstop quote)"))
+    return cheapest
 
 
 def process_file(
     path: Path, paths: Paths, conn: sqlite3.Connection, raw_db: TinyDB,
     settings: Settings, client: Anthropic | None = None,
 ) -> dict:
-    """Run one file through Detect, Land, Redact, Classify, Extract and Validate."""
+    """Run one file through Detect, Land, Redact, Classify, Extract, Validate, Load, Decide, Act."""
     ctx = RunContext(conn, new_run_id(), path.name)
     outcome = {"run_id": ctx.run_id, "file_name": path.name}
 
@@ -253,10 +298,13 @@ def process_file(
     redacted = redact_step(ctx, raw_db, records)
     classifications, injected = classify_step(ctx, settings, client, redacted)
     extractions = extract_step(ctx, settings, client, redacted, injected)
-    validated, quarantined = validate_step(ctx, raw_db, redacted, classifications, extractions, injected)
+    validated = validate_step(ctx, raw_db, redacted, classifications, extractions, injected)
+    cheapest_nonstop_usd = load_step(ctx, settings, validated)
+    decision = decide_and_act(ctx, settings, client, cheapest_nonstop_usd)
 
     message = (f"landed {len(records)} record(s); moved to {paths.processed.name}/{dest.name}; "
-               f"{validated} validated, {quarantined} quarantined")
+               f"{len(validated)} validated, {len(records) - len(validated)} quarantined; "
+               f"{'HELD' if decision['fired'] else 'published'}")
     return {**outcome, "status": "landed", "message": message}
 
 

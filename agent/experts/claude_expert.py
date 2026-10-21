@@ -24,6 +24,7 @@ from agent.db import RunContext, now_utc, tokens_used_today, write_log
 from agent.experts import jev_expert, rules
 from agent.models import QuoteClassification, QuoteExtraction, choice_confidence
 from agent.router import route
+from agent.stats import StatResult
 
 # Rough per-million-token estimates for the log, not what the class Console actually bills.
 PRICE_PER_MTOK_USD = {
@@ -281,3 +282,42 @@ def run_classification(ctx: RunContext, client: Anthropic, settings: Settings, n
         outcome="valid",
     )
     return result
+
+
+EXPLAIN_PROMPT_VERSION = "explain_v1"
+
+
+def explain(ctx: RunContext, client: Anthropic | None, settings: Settings, result: StatResult) -> str:
+    """A 2-3 sentence plain-English explanation of a held import, for the alert banner."""
+    decision = route("explain", settings, tokens_used_today(ctx.conn))
+    if decision.expert == "rules":
+        ctx.log_model_call("explain", "explain", "rules", decision.reason, outcome="valid")
+        return result.interpretation
+
+    prompt = (
+        "In 2-3 plain-English sentences for a non-technical reader, explain why this fare "
+        "import was flagged as unusual and what a person reviewing it should check. Do not "
+        "invent facts beyond what is given below.\n\n"
+        f"Statistic: {result.method}, value={result.result}, threshold={result.threshold}\n"
+        f"Details: {result.interpretation}"
+    )
+    key = cache_key("explain", decision.expert, EXPLAIN_PROMPT_VERSION, prompt)
+    cached = _cached(ctx, key)
+    if cached:
+        text, in_tok, out_tok, latency = cached["data"]["text"], cached["input_tokens"], cached["output_tokens"], 0
+    else:
+        start = time.perf_counter()
+        response = client.messages.create(
+            model=decision.expert, max_tokens=300, messages=[{"role": "user", "content": prompt}]
+        )
+        latency = round((time.perf_counter() - start) * 1000)
+        text = "".join(block.text for block in response.content if block.type == "text").strip()
+        in_tok, out_tok = response.usage.input_tokens, response.usage.output_tokens
+        _store_cache(ctx, key, "explain", decision.expert, EXPLAIN_PROMPT_VERSION, {"text": text}, in_tok, out_tok)
+
+    ctx.log_model_call(
+        "explain", "explain", decision.expert, decision.reason, prompt_version=EXPLAIN_PROMPT_VERSION,
+        input_tokens=in_tok, output_tokens=out_tok, latency_ms=latency,
+        estimated_cost_usd=estimate_cost(decision.expert, in_tok, out_tok), outcome="valid",
+    )
+    return text or result.interpretation

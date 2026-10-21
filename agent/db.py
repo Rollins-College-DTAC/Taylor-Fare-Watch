@@ -56,6 +56,24 @@ CREATE TABLE IF NOT EXISTS model_cache (
   cache_key TEXT PRIMARY KEY, task TEXT, expert TEXT, prompt_version TEXT,
   response_json TEXT, input_tokens INTEGER, output_tokens INTEGER, created_at TEXT
 );
+CREATE TABLE IF NOT EXISTS imports (
+  run_id TEXT PRIMARY KEY, file_name TEXT, landed_at TEXT,
+  cheapest_nonstop_usd REAL, published INTEGER NOT NULL DEFAULT 0,
+  held INTEGER NOT NULL DEFAULT 0, decided_at TEXT
+);
+CREATE TABLE IF NOT EXISTS quotes (
+  run_id TEXT, file_name TEXT, row_index INTEGER, quote_id TEXT,
+  carrier_code TEXT, flight_number TEXT, origin TEXT, destination TEXT,
+  depart_date TEXT, return_date TEXT, fare_amount_usd REAL, fare_currency_quoted TEXT,
+  cabin TEXT, seats_left INTEGER, nonstop INTEGER,
+  checked_bag_included INTEGER, refundable INTEGER, price_hold_hours INTEGER,
+  category TEXT, urgency TEXT, injection INTEGER,
+  extract_outcome TEXT, loaded_at TEXT
+);
+CREATE VIEW IF NOT EXISTS gold_imports AS
+  SELECT * FROM imports WHERE published = 1;
+CREATE VIEW IF NOT EXISTS gold_quotes AS
+  SELECT q.* FROM quotes q JOIN imports i ON q.run_id = i.run_id WHERE i.published = 1;
 """
 
 MAX_LOGGED_TEXT = 80  # long text values are shortened in sql_log

@@ -130,6 +130,8 @@ def test_every_step_has_start_and_finish(env):
     make_imports(paths, 3)
     scan(paths, conn, raw_db)
     rows = run_log(conn)
-    assert len(rows) == 18  # detect, land, redact, classify, extract, validate for each file
+    assert len(rows) == 27  # detect, land, redact, classify, extract, validate, load, decide, act per file
     assert all(r["started_at"] and r["finished_at"] and r["status"] != "running" for r in rows)
-    assert {r["step"] for r in rows} == {"detect", "land", "redact", "classify", "extract", "validate"}
+    assert {r["step"] for r in rows} == {
+        "detect", "land", "redact", "classify", "extract", "validate", "load", "decide", "act",
+    }
