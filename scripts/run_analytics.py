@@ -40,11 +40,12 @@ def log_stat(ctx: RunContext, step: str, result: StatResult) -> None:
     print(f"[{step}] {result.method}: {result.interpretation}")
 
 
-def fetch_gold_quotes(conn: sqlite3.Connection) -> list[dict]:
+def fetch_gold_quotes(ctx: RunContext) -> list[dict]:
     return [
-        dict(r) for r in conn.execute(
+        dict(r) for r in ctx.run_sql(
+            "analytics",
             "SELECT q.*, i.landed_at FROM gold_quotes q JOIN imports i ON i.run_id = q.run_id "
-            "WHERE q.fare_amount_usd IS NOT NULL"
+            "WHERE q.fare_amount_usd IS NOT NULL",
         )
     ]
 
@@ -108,7 +109,7 @@ def chart_forecast(history: list[float], result: dict, path: Path) -> None:
 def run(conn: sqlite3.Connection, images_dir: Path) -> None:
     images_dir.mkdir(parents=True, exist_ok=True)
     ctx = RunContext(conn, f"run-analytics-{datetime.now():%Y%m%dT%H%M%S}", "scripts/run_analytics.py")
-    quotes = fetch_gold_quotes(conn)
+    quotes = fetch_gold_quotes(ctx)
     if not quotes:
         sys.exit("No gold quotes yet -- run the agent first.")
 

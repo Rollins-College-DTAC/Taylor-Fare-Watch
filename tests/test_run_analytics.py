@@ -52,5 +52,8 @@ def test_run_analytics_logs_stats_and_saves_every_chart(populated_conn, tmp_path
     saved = {p.name for p in images_dir.glob("*.png")}
     assert expected_charts <= saved
 
+    sql_rows = [dict(r) for r in populated_conn.execute("SELECT * FROM sql_log WHERE step = 'analytics'")]
+    assert sql_rows and "gold_quotes" in sql_rows[0]["sql_text"]
+
     methods = {r["method"] for r in populated_conn.execute("SELECT method FROM stats_log")}
     assert methods == {"descriptive-ci", "welch-t-test", "correlation-regression"}

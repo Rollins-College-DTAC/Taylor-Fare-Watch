@@ -20,8 +20,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # so `agent` imports from scripts/
 
-from agent.config import load_settings  # noqa: E402
-from agent.db import connect, RunContext  # noqa: E402
+from agent.config import load_paths, load_settings  # noqa: E402
+from agent.db import connect, now_utc, write_log, RunContext  # noqa: E402
 from agent.experts import claude_expert, rules  # noqa: E402
 from agent.models import QuoteClassification, QuoteExtraction  # noqa: E402
 from agent.redact import redact_record  # noqa: E402
@@ -183,15 +183,51 @@ def main() -> None:
             briers.append(class_scores["brier"])
 
     n = len(gold_rows)
+    field_accuracy = totals["correct"] / totals["total"]
+    category_accuracy = category_correct / n
+    injection_accuracy = injection_correct / n
+    brier = sum(briers) / len(briers) if briers else None
+
     print(f"expert: {args.expert} | records: {n}")
     print(f"extraction fields -- correct: {totals['correct']}, wrong: {totals['wrong']}, "
           f"invented: {totals['invented']}, missed (null when gold had a value): {totals['missed']}, "
           f"total checked: {totals['total']}")
-    print(f"field accuracy: {totals['correct'] / totals['total']:.1%}")
-    print(f"category accuracy: {category_correct / n:.1%}")
-    print(f"injection detection accuracy: {injection_correct / n:.1%}")
-    if briers:
-        print(f"category Brier score (lower is better, 0 = perfect): {sum(briers) / len(briers):.4f}")
+    print(f"field accuracy: {field_accuracy:.1%}")
+    print(f"category accuracy: {category_accuracy:.1%}")
+    print(f"injection detection accuracy: {injection_accuracy:.1%}")
+    if brier is not None:
+        print(f"category Brier score (lower is better, 0 = perfect): {brier:.4f}")
+
+    log_gold_set_score(args.expert, n, field_accuracy, category_accuracy, injection_accuracy, brier, totals)
+
+
+def log_gold_set_score(
+    expert: str, n: int, field_accuracy: float, category_accuracy: float,
+    injection_accuracy: float, brier: float | None, totals: dict,
+) -> None:
+    """One summary row in the production stats_log, for the Governance page -- not the raw
+    per-record model calls, which stay in the isolated eval db (data/gold_set_eval.sqlite)."""
+    conn = connect(load_paths().sqlite)
+    try:
+        write_log(conn, "stats_log", {
+            "run_id": f"run-goldset-score-{datetime.now(timezone.utc):%Y%m%dT%H%M%S}",
+            "step": "governance", "method": f"gold-set-{expert}",
+            "formula_latex": r"\mathrm{accuracy} = \frac{\text{correct}}{\text{total}}",
+            "inputs_json": json.dumps({
+                "n": n, "category_accuracy": round(category_accuracy, 4),
+                "injection_accuracy": round(injection_accuracy, 4), "brier": brier, **totals,
+            }),
+            "result": round(field_accuracy, 4), "threshold": None,
+            "interpretation": (
+                f"{expert}: field accuracy {field_accuracy:.1%}, category accuracy {category_accuracy:.1%}, "
+                f"injection detection {injection_accuracy:.1%}"
+                + (f", Brier score {brier:.4f}" if brier is not None else "")
+                + f" (n={n})."
+            ),
+            "computed_at": now_utc(),
+        })
+    finally:
+        conn.close()
 
 
 if __name__ == "__main__":
