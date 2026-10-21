@@ -52,8 +52,17 @@ def log_decision(ctx: RunContext, rule: str, statistic: float, threshold: float,
     })
 
 
+def quarantine_note(quarantined: int) -> str:
+    """A quarantined row may have been the import's cheapest fare, so a reviewer needs to know."""
+    if not quarantined:
+        return ""
+    return (f" Note: {quarantined} quote(s) from this import were quarantined before Load, so the "
+            f"real cheapest fare may be missing from this calculation.")
+
+
 def decide_and_act(
-    ctx: RunContext, settings: Settings, client: Anthropic | None, cheapest_nonstop_usd: float | None
+    ctx: RunContext, settings: Settings, client: Anthropic | None, cheapest_nonstop_usd: float | None,
+    quarantined: int = 0,
 ) -> dict:
     """Runs after Load. Returns {"fired": bool} for the caller's log message."""
     fired = False
@@ -65,6 +74,7 @@ def decide_and_act(
         else:
             history = rolling_history(ctx)
             result = z_score_anomaly(cheapest_nonstop_usd, history, threshold=Z_THRESHOLD)
+            result.interpretation += quarantine_note(quarantined)
             log_stat(ctx, "decide", result)
             fired = len(history) >= 2 and abs(result.result) > result.threshold
             action = "hold_and_alert" if fired else "publish"
@@ -74,6 +84,9 @@ def decide_and_act(
     with step(ctx, "act") as s:
         if fired:
             explanation = claude_expert.explain(ctx, client, settings, result)
+            note = quarantine_note(quarantined)
+            if note and note.strip() not in explanation:  # a model may paraphrase it away
+                explanation += note
             incident_id = open_incident(ctx, "trigger", explanation)
             ctx.run_sql(
                 "act", "UPDATE imports SET held = 1, decided_at = ? WHERE run_id = ?", (now_utc(), ctx.run_id)

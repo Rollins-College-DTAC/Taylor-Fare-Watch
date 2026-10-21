@@ -8,8 +8,10 @@ from faker import Faker
 from tinydb import TinyDB
 
 from agent.config import Paths, Settings
-from agent.db import connect
+from agent.db import RunContext, connect
+from agent.decide import decide_and_act
 from agent.etl import scan_inbox
+from agent.experts import claude_expert
 from generator.generate import render_csv
 from generator.simulate import build_import
 
@@ -89,3 +91,48 @@ def test_trigger_does_not_fire_on_normal_imports(env):
     imports = import_rows(conn)
     assert all(r["held"] == 0 for r in imports)
     assert sum(r["published"] for r in imports) == len(imports)
+
+
+def seed_history_and_current(conn, current_fare: float) -> RunContext:
+    """Six published imports near $210, plus an undecided current import."""
+    for i, fare in enumerate([208.0, 211.0, 209.5, 212.0, 210.0, 207.5]):
+        conn.execute(
+            "INSERT INTO imports (run_id, file_name, landed_at, cheapest_nonstop_usd, published, held) "
+            "VALUES (?, ?, '2026-10-21T09:00:00+00:00', ?, 1, 0)", (f"run-h{i}", f"h{i}.csv", fare),
+        )
+    conn.execute(
+        "INSERT INTO imports (run_id, file_name, landed_at, cheapest_nonstop_usd, published, held) "
+        "VALUES ('run-now', 'now.csv', '2026-10-21T09:10:00+00:00', ?, 0, 0)", (current_fare,),
+    )
+    return RunContext(conn, "run-now", "now.csv")
+
+
+def test_hold_explanation_says_when_quotes_were_quarantined(env):
+    _, conn, _ = env
+    ctx = seed_history_and_current(conn, current_fare=339.66)
+    assert decide_and_act(ctx, TEST_SETTINGS, None, 339.66, quarantined=2)["fired"]
+
+    detail = conn.execute("SELECT detail FROM incident_log WHERE kind = 'trigger'").fetchone()["detail"]
+    assert "2 quote(s) from this import were quarantined" in detail
+    interpretation = conn.execute("SELECT interpretation FROM stats_log WHERE step = 'decide'").fetchone()[0]
+    assert "real cheapest fare may be missing" in interpretation
+
+
+def test_quarantine_note_survives_a_paraphrasing_explainer(env, monkeypatch):
+    _, conn, _ = env
+    ctx = seed_history_and_current(conn, current_fare=339.66)
+    monkeypatch.setattr(claude_expert, "explain", lambda *args: "This fare is unusually high.")
+    decide_and_act(ctx, TEST_SETTINGS, None, 339.66, quarantined=1)
+
+    detail = conn.execute("SELECT detail FROM incident_log WHERE kind = 'trigger'").fetchone()["detail"]
+    assert detail.startswith("This fare is unusually high.")
+    assert "1 quote(s) from this import were quarantined" in detail
+
+
+def test_no_quarantine_note_when_nothing_was_quarantined(env):
+    _, conn, _ = env
+    ctx = seed_history_and_current(conn, current_fare=339.66)
+    decide_and_act(ctx, TEST_SETTINGS, None, 339.66, quarantined=0)
+
+    detail = conn.execute("SELECT detail FROM incident_log WHERE kind = 'trigger'").fetchone()["detail"]
+    assert "quarantined" not in detail

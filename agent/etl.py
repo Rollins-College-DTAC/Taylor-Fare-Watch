@@ -300,7 +300,9 @@ def process_file(
     extractions = extract_step(ctx, settings, client, redacted, injected)
     validated = validate_step(ctx, raw_db, redacted, classifications, extractions, injected)
     cheapest_nonstop_usd = load_step(ctx, settings, validated)
-    decision = decide_and_act(ctx, settings, client, cheapest_nonstop_usd)
+    decision = decide_and_act(
+        ctx, settings, client, cheapest_nonstop_usd, quarantined=len(records) - len(validated)
+    )
 
     message = (f"landed {len(records)} record(s); moved to {paths.processed.name}/{dest.name}; "
                f"{len(validated)} validated, {len(records) - len(validated)} quarantined; "
