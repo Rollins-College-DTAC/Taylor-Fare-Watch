@@ -40,9 +40,11 @@ class FakeUsage:
 
 
 class FakeResponse:
-    def __init__(self, data):
-        self.content = [FakeBlock(json.dumps(data))]
+    def __init__(self, data, stop_reason="end_turn"):
+        text = data if isinstance(data, str) else json.dumps(data)
+        self.content = [FakeBlock(text)]
         self.usage = FakeUsage()
+        self.stop_reason = stop_reason
 
 
 class FakeMessages:
@@ -52,7 +54,10 @@ class FakeMessages:
 
     def create(self, model, max_tokens, messages):
         self.calls.append({"model": model, "messages": messages})
-        return FakeResponse(self._replies.pop(0))
+        reply = self._replies.pop(0)
+        if isinstance(reply, tuple):  # (raw_text, stop_reason), for truncated-reply tests
+            return FakeResponse(*reply)
+        return FakeResponse(reply)
 
 
 class FakeClient:
@@ -117,6 +122,23 @@ def test_extract_quarantined_after_sonnet_retry_fails_twice(ctx):
     rows = usage_rows(ctx)
     assert [r["outcome"] for r in rows] == ["quarantined", "quarantined", "quarantined"]
     assert len(client.messages.calls) == 3
+
+
+def test_extract_recovers_from_a_truncated_reply_on_retry(ctx):
+    truncated = ('{"quote_id": "q-1", "carrier_code": "LK"', "max_tokens")  # cut off mid-string
+    client = FakeClient([LOW_CONFIDENCE_EXTRACTION, truncated, VALID_EXTRACTION])
+    result = claude_expert.run_extraction(ctx, client, settings(), RAW_RECORD)
+    assert result.outcome == "escalated"
+    assert result.data.quote_id == "q-1"
+    assert [r["outcome"] for r in usage_rows(ctx)] == ["valid", "quarantined", "valid"]
+
+
+def test_extract_quarantined_when_every_reply_is_truncated(ctx):
+    truncated = ('{"quote_id": "q-1"', "max_tokens")
+    client = FakeClient([truncated, truncated, truncated])
+    result = claude_expert.run_extraction(ctx, client, settings(), RAW_RECORD)
+    assert result.outcome == "quarantined"
+    assert result.data is None
 
 
 def test_extract_uses_rules_when_kill_switch_is_on(ctx):

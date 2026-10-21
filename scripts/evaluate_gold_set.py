@@ -20,7 +20,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # so `agent` imports from scripts/
 
-from agent.config import load_paths, load_settings  # noqa: E402
+from agent.config import load_settings  # noqa: E402
 from agent.db import connect, RunContext  # noqa: E402
 from agent.experts import claude_expert, rules  # noqa: E402
 from agent.models import QuoteClassification, QuoteExtraction  # noqa: E402
@@ -117,7 +117,14 @@ def run_rules(records: list[dict]) -> list[tuple[QuoteExtraction | None, QuoteCl
     return out
 
 
+EVAL_DB_PATH = PROJECT_ROOT / "data" / "gold_set_eval.sqlite"
+
+
 def run_claude(records: list[dict]) -> list[tuple[QuoteExtraction | None, QuoteClassification]]:
+    """Uses its own SQLite file, not data/analytics.sqlite: scoring runs must not share a
+    daily token budget with the production agent, or repeated scoring passes silently start
+    falling back to the rules expert mid-run once the shared budget is spent -- exactly what
+    happened the first time this ran against the production database."""
     from anthropic import Anthropic
 
     from agent.config import anthropic_client_kwargs
@@ -126,9 +133,10 @@ def run_claude(records: list[dict]) -> list[tuple[QuoteExtraction | None, QuoteC
     if settings.kill_switch:
         sys.exit("config.toml kill_switch is on; turn it off to score the claude expert")
     client = Anthropic(**anthropic_client_kwargs())
-    conn = connect(load_paths().sqlite)
+    conn = connect(EVAL_DB_PATH)
     run_id = f"run-goldset-{datetime.now(timezone.utc):%Y%m%dT%H%M%S}"
     out = []
+    rules_fallback = 0
     try:
         for i, record in enumerate(records):
             ctx = RunContext(conn, run_id, f"gold_set.csv#{i}")
@@ -137,8 +145,13 @@ def run_claude(records: list[dict]) -> list[tuple[QuoteExtraction | None, QuoteC
             note = str(redacted.get("seller_note") or redacted.get("note") or "")
             classification = claude_expert.run_classification(ctx, client, settings, note)
             out.append((extraction_result.data, classification))
+            if extraction_result.expert == "rules":
+                rules_fallback += 1
     finally:
         conn.close()
+    if rules_fallback:
+        print(f"warning: {rules_fallback} of {len(records)} records fell back to rules "
+              f"(daily token budget exhausted in {EVAL_DB_PATH.name}) -- not a clean claude score")
     return out
 
 

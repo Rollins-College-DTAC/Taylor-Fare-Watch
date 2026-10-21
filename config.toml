@@ -8,7 +8,7 @@ escalate = "claude-sonnet-5-5"    # re-extraction when Haiku is unsure, and plai
 jev_enabled = false               # set true once Jev (TypeSafe) access and its client are set up
 
 [prompts]
-extract = "extract_v1.md"
+extract = "extract_v2.md"         # v1 missed the "LK 330" -> "LK330" flight-number normalization
 jev_questions = "jev_questions_v1.json"
 
 [limits]

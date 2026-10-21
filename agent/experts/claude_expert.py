@@ -14,6 +14,7 @@ import hashlib
 import json
 import time
 from dataclasses import dataclass
+from pathlib import Path
 
 from anthropic import Anthropic
 from pydantic import ValidationError
@@ -23,9 +24,6 @@ from agent.db import RunContext, now_utc, tokens_used_today, write_log
 from agent.experts import jev_expert, rules
 from agent.models import QuoteClassification, QuoteExtraction, choice_confidence
 from agent.router import route
-
-EXTRACT_PROMPT_VERSION = "extract_v1"
-CLASSIFY_PROMPT_VERSION = "classify_v1"
 
 # Rough per-million-token estimates for the log, not what the class Console actually bills.
 PRICE_PER_MTOK_USD = {
@@ -78,6 +76,16 @@ def _store_cache(
     })
 
 
+class ModelReplyInvalid(Exception):
+    """The model's reply wasn't parseable JSON (often a truncated reply that hit max_tokens)."""
+
+    def __init__(self, message: str, input_tokens: int, output_tokens: int, latency_ms: int):
+        super().__init__(message)
+        self.input_tokens = input_tokens
+        self.output_tokens = output_tokens
+        self.latency_ms = latency_ms
+
+
 def _parse_json(text: str) -> dict:
     text = text.strip()
     if text.startswith("```"):
@@ -92,11 +100,24 @@ def _call(client: Anthropic, model: str, prompt: str, max_tokens: int) -> tuple[
     )
     latency_ms = round((time.perf_counter() - start) * 1000)
     text = "".join(block.text for block in response.content if block.type == "text")
-    return _parse_json(text), response.usage.input_tokens, response.usage.output_tokens, latency_ms
+    try:
+        data = _parse_json(text)
+    except (json.JSONDecodeError, IndexError) as exc:
+        raise ModelReplyInvalid(
+            f"reply was not valid JSON ({exc}); stop_reason={response.stop_reason}",
+            response.usage.input_tokens, response.usage.output_tokens, latency_ms,
+        ) from exc
+    return data, response.usage.input_tokens, response.usage.output_tokens, latency_ms
 
 
-def _extract_prompt(record_text: str) -> str:
-    template = (PROMPTS_DIR / "extract_v1.md").read_text(encoding="utf-8")
+def _prompt_version(filename: str) -> str:
+    """config.toml names the prompt/questions file; the version for logs and the cache is
+    its stem, so bumping config.toml to extract_v2.md automatically stops reusing v1's cache."""
+    return Path(filename).stem
+
+
+def _extract_prompt(record_text: str, prompt_file: str) -> str:
+    template = (PROMPTS_DIR / prompt_file).read_text(encoding="utf-8")
     return template.replace("{record_text}", record_text)
 
 
@@ -105,33 +126,43 @@ def _try_extract(
     record: dict, record_text: str, error_hint: str | None = None,
 ) -> tuple[QuoteExtraction | None, str | None]:
     """One extraction attempt. Returns (result, error) -- exactly one is None."""
+    prompt_version = _prompt_version(settings.extract_prompt)
     if expert == "rules":
         data = rules.extract(record)
         in_tok = out_tok = latency = 0
     else:
-        key = cache_key("extract", expert, EXTRACT_PROMPT_VERSION, record_text + (error_hint or ""))
+        key = cache_key("extract", expert, prompt_version, record_text + (error_hint or ""))
         cached = _cached(ctx, key)
         if cached:
             data, in_tok, out_tok, latency = cached["data"], cached["input_tokens"], cached["output_tokens"], 0
         else:
-            prompt = _extract_prompt(record_text)
+            prompt = _extract_prompt(record_text, settings.extract_prompt)
             if error_hint:
                 prompt += f"\n\nYour previous answer failed validation: {error_hint}\nReturn corrected JSON only."
-            data, in_tok, out_tok, latency = _call(client, expert, prompt, max_tokens=600)
-            _store_cache(ctx, key, "extract", expert, EXTRACT_PROMPT_VERSION, data, in_tok, out_tok)
+            try:
+                data, in_tok, out_tok, latency = _call(client, expert, prompt, max_tokens=1024)
+            except ModelReplyInvalid as exc:
+                ctx.log_model_call(
+                    "extract", "extract", expert, reason, prompt_version=prompt_version,
+                    input_tokens=exc.input_tokens, output_tokens=exc.output_tokens, latency_ms=exc.latency_ms,
+                    estimated_cost_usd=estimate_cost(expert, exc.input_tokens, exc.output_tokens),
+                    outcome="quarantined",
+                )
+                return None, str(exc)
+            _store_cache(ctx, key, "extract", expert, prompt_version, data, in_tok, out_tok)
 
     try:
         extraction = QuoteExtraction.model_validate(data, context=settings)
     except ValidationError as exc:
         ctx.log_model_call(
-            "extract", "extract", expert, reason, prompt_version=EXTRACT_PROMPT_VERSION,
+            "extract", "extract", expert, reason, prompt_version=prompt_version,
             input_tokens=in_tok, output_tokens=out_tok, latency_ms=latency,
             estimated_cost_usd=estimate_cost(expert, in_tok, out_tok), outcome="quarantined",
         )
         return None, str(exc)
 
     ctx.log_model_call(
-        "extract", "extract", expert, reason, prompt_version=EXTRACT_PROMPT_VERSION,
+        "extract", "extract", expert, reason, prompt_version=prompt_version,
         input_tokens=in_tok, output_tokens=out_tok, latency_ms=latency,
         confidence=1.0 if extraction.confidence == "high" else 0.4,
         estimated_cost_usd=estimate_cost(expert, in_tok, out_tok), outcome="valid",
@@ -214,22 +245,37 @@ def run_classification(ctx: RunContext, client: Anthropic, settings: Settings, n
         except jev_expert.JevUnavailable as exc:
             expert, reason = settings.extract_model, f"Jev unavailable ({exc}); falling back to the extractor"
 
+    prompt_version = _prompt_version(settings.jev_questions)
     if probs is not None:
         in_tok = out_tok = latency = 0
     else:
-        questions = json.loads((PROMPTS_DIR / "jev_questions_v1.json").read_text(encoding="utf-8"))
-        key = cache_key("classify", expert, CLASSIFY_PROMPT_VERSION, note)
+        questions = json.loads((PROMPTS_DIR / settings.jev_questions).read_text(encoding="utf-8"))
+        key = cache_key("classify", expert, prompt_version, note)
         cached = _cached(ctx, key)
         if cached:
             probs, in_tok, out_tok, latency = cached["data"], cached["input_tokens"], cached["output_tokens"], 0
         else:
             prompt = _classify_prompt(questions, note)
-            probs, in_tok, out_tok, latency = _call(client, expert, prompt, max_tokens=300)
-            _store_cache(ctx, key, "classify", expert, CLASSIFY_PROMPT_VERSION, probs, in_tok, out_tok)
+            try:
+                probs, in_tok, out_tok, latency = _call(client, expert, prompt, max_tokens=500)
+            except ModelReplyInvalid as exc:
+                ctx.log_model_call(
+                    "classify", "classify", expert, reason, prompt_version=prompt_version,
+                    input_tokens=exc.input_tokens, output_tokens=exc.output_tokens, latency_ms=exc.latency_ms,
+                    estimated_cost_usd=estimate_cost(expert, exc.input_tokens, exc.output_tokens),
+                    outcome="quarantined",
+                )
+                result = QuoteClassification.model_validate(rules.classify({"seller_note": note}))
+                ctx.log_model_call(
+                    "classify", "classify", "rules", f"{reason}; model reply was unusable, fell back to rules",
+                    confidence=result.category_confidence, outcome="valid",
+                )
+                return result
+            _store_cache(ctx, key, "classify", expert, prompt_version, probs, in_tok, out_tok)
 
     result = _classification_from_probs(probs)
     ctx.log_model_call(
-        "classify", "classify", expert, reason, prompt_version=CLASSIFY_PROMPT_VERSION,
+        "classify", "classify", expert, reason, prompt_version=prompt_version,
         input_tokens=in_tok, output_tokens=out_tok, latency_ms=latency,
         confidence=result.category_confidence, estimated_cost_usd=estimate_cost(expert, in_tok, out_tok),
         outcome="valid",
