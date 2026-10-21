@@ -1,5 +1,6 @@
 """Analytics page: the statistical methods, the forecast and backtest, trigger precision
-and recall. Run `python scripts/run_analytics.py` to (re)compute everything shown here."""
+and recall. Locally `python scripts/run_analytics.py` (re)computes everything shown here; in
+the cloud the pipeline does it every minute."""
 
 from __future__ import annotations
 
@@ -17,12 +18,8 @@ from dashboard.analytics_page import (  # noqa: E402
     stats_for_run,
     trigger_precision_recall,
 )
-from dashboard.db import get_connection  # noqa: E402
+from dashboard.db import data_file, get_connection  # noqa: E402
 from dashboard.fmt import md  # noqa: E402
-
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-IMAGES_DIR = PROJECT_ROOT / "docs" / "images"
-GENERATOR_LOG = PROJECT_ROOT / "generator_log.csv"
 
 st.title("Analytics")
 
@@ -33,12 +30,12 @@ if conn is None:
 
 run_id = latest_analytics_run_id(conn)
 if run_id is None:
-    st.info("No analytics logged yet. Run `python scripts/run_analytics.py`.")
+    st.info("No analytics logged yet. Locally, run `python scripts/run_analytics.py`.")
     st.stop()
 
 stats = stats_for_run(conn, run_id)
 sql_rows = sql_for_run(conn, run_id)
-st.caption(f"From the most recent `python scripts/run_analytics.py` run ({run_id}).")
+st.caption(f"From the most recent analytics run ({run_id}).")
 
 CHART_FILES = {
     "descriptive-ci": ["fare_by_carrier.png", "fare_by_week.png"],
@@ -52,8 +49,9 @@ for stat in stats:
     st.latex(stat["formula_latex"])
     st.write(md(stat["interpretation"]))
     for chart_name in CHART_FILES.get(stat["method"], []):
-        if chart_name not in shown_charts and (IMAGES_DIR / chart_name).exists():
-            st.image(str(IMAGES_DIR / chart_name))
+        chart = data_file(f"exports/images/{chart_name}")
+        if chart_name not in shown_charts and chart:
+            st.image(str(chart))
             shown_charts.add(chart_name)
     with st.expander("How this was calculated"):
         st.json(json.loads(stat["inputs_json"]))
@@ -63,8 +61,8 @@ for stat in stats:
             st.code(r["sql_text"], language="sql")
 
 st.subheader("Forecast")
-forecast_path = IMAGES_DIR / "forecast.png"
-if forecast_path.exists():
+forecast_path = data_file("exports/images/forecast.png")
+if forecast_path:
     st.image(str(forecast_path))
     st.latex(r"\hat{y}_{t+h} \pm 1.96\,\hat{\sigma}_h")
     st.latex(r"\mathrm{MAE} = \frac{1}{n}\sum_t |y_t - \hat{y}_t|, "
@@ -73,7 +71,7 @@ else:
     st.info("No forecast chart yet; it needs at least 21 published imports.")
 
 st.subheader("Trigger precision and recall")
-pr = trigger_precision_recall(conn, GENERATOR_LOG)
+pr = trigger_precision_recall(conn, data_file("generator_log.csv"))
 if pr is None:
     st.info("Need generator_log.csv (the generator's ground truth) to score the trigger.")
 else:

@@ -64,3 +64,17 @@ def build_flow_dot(step_rows: dict[str, dict], outcome: str | None) -> str:
         lines.append('  act -> hold [style=dashed, color="#999999"];')
     lines.append("}")
     return "\n".join(lines)
+
+
+def replay_frame(step_rows: dict[str, dict], outcome: str | None, tick: int) -> tuple[dict[str, dict], str | None]:
+    """One frame of a replay of a finished run, for the cloud, where data arrives once a
+    minute and a live chart would never move. Frame k shows the first k logged steps as
+    they finished and step k+1 as running; the last two frames show the whole run and its
+    outcome. `tick` is any counter that goes up by one per refresh."""
+    present = [s for s in STEPS if s in step_rows]
+    shown = tick % (len(present) + 2)
+    if shown >= len(present):
+        return step_rows, outcome
+    rows = {s: step_rows[s] for s in present[:shown]}
+    rows[present[shown]] = {**step_rows[present[shown]], "status": "running", "message": None}
+    return rows, None

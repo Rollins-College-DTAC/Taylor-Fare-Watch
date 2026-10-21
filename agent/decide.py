@@ -22,6 +22,10 @@ from agent.stats import StatResult, z_score_anomaly
 
 ROLLING_WINDOW = 60
 Z_THRESHOLD = 3.0
+# A standard deviation from two or three points is close to meaningless: on a fresh data
+# branch, two fares $3 apart made a normal $256 fare look like z = 19. Wait for as many
+# prior imports as the generator's own anomaly warmup before the trigger may fire.
+MIN_HISTORY = 5
 
 
 def rolling_history(ctx: RunContext, limit: int = ROLLING_WINDOW) -> list[float]:
@@ -75,8 +79,11 @@ def decide_and_act(
             history = rolling_history(ctx)
             result = z_score_anomaly(cheapest_nonstop_usd, history, threshold=Z_THRESHOLD)
             result.interpretation += quarantine_note(quarantined)
+            if len(history) < MIN_HISTORY:
+                result.interpretation += (f" The trigger waits for {MIN_HISTORY} prior published imports "
+                                          f"before it can fire, so this import is published.")
             log_stat(ctx, "decide", result)
-            fired = len(history) >= 2 and abs(result.result) > result.threshold
+            fired = len(history) >= MIN_HISTORY and abs(result.result) > result.threshold
             action = "hold_and_alert" if fired else "publish"
             log_decision(ctx, "anomaly", result.result, result.threshold, fired, action)
             s.message = f"{result.interpretation} -> {action}"

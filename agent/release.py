@@ -1,18 +1,22 @@
 """Release or reject a held import. A person decides; the agent never does this on its own.
 
-Shared by scripts/review_imports.py (CLI) and the dashboard's Live run page (buttons), so
-there is exactly one place that writes this decision.
+Shared by scripts/review_imports.py (CLI), the dashboard's Live run page (local buttons) and
+the cloud's review requests, so there is exactly one place that writes this decision.
 """
 
 from __future__ import annotations
 
+import json
 import sqlite3
 
 from agent.db import now_utc
 
+DECISIONS = ("released", "rejected")
+
 
 class ReleaseError(Exception):
-    """The incident ID doesn't exist, isn't a trigger hold, or is already decided."""
+    """The incident ID doesn't exist, isn't a trigger hold, is already decided, or the
+    decision isn't one of DECISIONS."""
 
 
 def list_held(conn: sqlite3.Connection) -> list[sqlite3.Row]:
@@ -25,6 +29,10 @@ def list_held(conn: sqlite3.Connection) -> list[sqlite3.Row]:
 
 def resolve(conn: sqlite3.Connection, incident_id: str, decision: str, decided_by: str) -> None:
     """decision is "released" or "rejected"."""
+    if decision not in DECISIONS:
+        raise ReleaseError(f"unknown decision {decision!r}")
+    if not decided_by.strip():
+        raise ReleaseError("a reviewer name is required")
     incident = conn.execute(
         "SELECT run_id, status FROM incident_log WHERE incident_id = ? AND kind = 'trigger'", (incident_id,)
     ).fetchone()
@@ -45,3 +53,19 @@ def resolve(conn: sqlite3.Connection, incident_id: str, decision: str, decided_b
         )
     else:
         conn.execute("UPDATE imports SET held = 0, decided_at = ? WHERE run_id = ?", (now, incident["run_id"]))
+
+
+def apply_review_requests(conn: sqlite3.Connection, lines: list[str]) -> list[str]:
+    """Apply decisions from the cloud's append-only reviews.jsonl, one JSON object per line
+    ({"incident_id", "decision", "reviewer", ...}). Safe to run again on the same lines:
+    an incident that is already decided is skipped, as is any malformed line. Returns the
+    incident IDs this call decided."""
+    applied = []
+    for line in lines:
+        try:
+            request = json.loads(line)
+            resolve(conn, request["incident_id"], request["decision"], request["reviewer"])
+        except (json.JSONDecodeError, KeyError, TypeError, AttributeError, ReleaseError):
+            continue
+        applied.append(request["incident_id"])
+    return applied

@@ -1,0 +1,64 @@
+# The cloud run: one import a minute for N minutes inside one job (Actions schedules can't
+# run more often than every 5 minutes), committing state to the `data` branch each minute.
+# Start it from the Actions tab: pipeline -> Run workflow.
+name: pipeline
+
+on:
+  workflow_dispatch:
+    inputs:
+      minutes:
+        description: "Minutes to run, one import per minute (max 40)"
+        required: true
+        default: "20"
+      kill_switch:
+        description: "Rules expert only: no model calls, no token cost"
+        type: boolean
+        default: false
+  # Optional: one short run each hour between demos (uncomment to enable).
+  # schedule:
+  #   - cron: "0 * * * *"
+
+permissions:
+  contents: write   # lets the job push the `data` branch with GITHUB_TOKEN; those pushes don't start other workflows
+
+concurrency:
+  group: pipeline
+  cancel-in-progress: false   # never let two runs write the `data` branch at once
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50   # above the 40-minute cap below
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      ANTHROPIC_WORKSPACE_ID: ${{ secrets.ANTHROPIC_WORKSPACE_ID }}
+      MINUTES: ${{ inputs.minutes || '5' }}
+      FAREWATCH_KILL_SWITCH: ${{ inputs.kill_switch && '1' || '0' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the run length
+        run: |
+          case "$MINUTES" in ''|*[!0-9]*) echo "minutes must be a whole number"; exit 1;; esac
+          if [ "$MINUTES" -lt 1 ] || [ "$MINUTES" -gt 40 ]; then echo "minutes must be 1-40"; exit 1; fi
+
+      - name: Configure git for commits
+        run: |
+          git config --global user.name "pipeline-bot"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Check out the data branch into state/
+        run: |
+          if git fetch origin data:data 2>/dev/null; then
+            git worktree add state data
+          else
+            git worktree add --orphan -b data state
+          fi
+
+      - uses: astral-sh/setup-uv@v6
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Run the agent
+        run: uv run python -m agent.cloud_loop --minutes "$MINUTES" --state state/

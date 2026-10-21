@@ -9,7 +9,7 @@ from tinydb import TinyDB
 
 from agent.config import Paths, Settings
 from agent.db import RunContext, connect
-from agent.decide import decide_and_act
+from agent.decide import MIN_HISTORY, decide_and_act
 from agent.etl import scan_inbox
 from agent.experts import claude_expert
 from generator.generate import render_csv
@@ -55,9 +55,9 @@ def import_rows(conn):
 def test_trigger_fires_on_a_seeded_mistake_fare(env):
     paths, conn, raw_db = env
     now = datetime(2026, 10, 21, 9, 0)
-    for seq in range(1, 5):  # below the generator's own warmup window: never a natural anomaly
+    for seq in range(0, MIN_HISTORY):  # below the generator's own warmup window: never a natural anomaly
         write_batch(paths, seq, now)
-    write_batch(paths, 5, now, force_anomaly="mistake_fare")
+    write_batch(paths, MIN_HISTORY, now, force_anomaly="mistake_fare")
 
     outcomes = scan_inbox(paths, conn, raw_db, TEST_SETTINGS, client=None)
     assert outcomes[-1]["status"] == "landed"
@@ -136,3 +136,24 @@ def test_no_quarantine_note_when_nothing_was_quarantined(env):
 
     detail = conn.execute("SELECT detail FROM incident_log WHERE kind = 'trigger'").fetchone()["detail"]
     assert "quarantined" not in detail
+
+
+def test_trigger_waits_for_enough_history_on_a_fresh_database(env):
+    """On a fresh data branch two fares $3 apart made a normal $256 fare look like z = 19."""
+    _, conn, _ = env
+    for i, fare in enumerate([217.62, 220.39]):
+        conn.execute(
+            "INSERT INTO imports (run_id, file_name, landed_at, cheapest_nonstop_usd, published, held) "
+            "VALUES (?, ?, '2026-10-21T09:00:00+00:00', ?, 1, 0)", (f"run-h{i}", f"h{i}.csv", fare),
+        )
+    conn.execute(
+        "INSERT INTO imports (run_id, file_name, landed_at, cheapest_nonstop_usd, published, held) "
+        "VALUES ('run-now', 'now.csv', '2026-10-21T09:10:00+00:00', 256.16, 0, 0)",
+    )
+    ctx = RunContext(conn, "run-now", "now.csv")
+    assert not decide_and_act(ctx, TEST_SETTINGS, None, 256.16)["fired"]
+
+    stat = conn.execute("SELECT result, interpretation FROM stats_log WHERE step = 'decide'").fetchone()
+    assert abs(stat["result"]) > 3  # the z-score is still computed and shown
+    assert f"waits for {MIN_HISTORY} prior published imports" in stat["interpretation"]
+    assert conn.execute("SELECT published FROM imports WHERE run_id = 'run-now'").fetchone()[0] == 1

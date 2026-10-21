@@ -1,4 +1,4 @@
-from dashboard.flowchart import STEPS, build_flow_dot
+from dashboard.flowchart import STEPS, build_flow_dot, replay_frame
 
 
 def test_every_step_appears_as_a_node():
@@ -44,3 +44,17 @@ def test_step_message_is_included_and_truncated():
 def test_edge_shows_row_count_when_known():
     dot = build_flow_dot({"land": {"status": "ok", "rows_in": 7}}, outcome=None)
     assert 'detect -> land [label="7 rows"]' in dot
+
+
+def test_replay_reveals_one_step_per_tick_then_the_outcome():
+    rows = {s: {"status": "ok", "message": s} for s in ("detect", "land", "decide")}
+    first, outcome = replay_frame(rows, "publish", tick=0)
+    assert first == {"detect": {"status": "running", "message": None}} and outcome is None
+
+    second, _ = replay_frame(rows, "publish", tick=1)
+    assert second["detect"]["status"] == "ok" and second["land"]["status"] == "running"
+    assert "decide" not in second
+
+    full, outcome = replay_frame(rows, "publish", tick=3)
+    assert full == rows and outcome == "publish"
+    assert replay_frame(rows, "publish", tick=5)[0] == first  # wraps around

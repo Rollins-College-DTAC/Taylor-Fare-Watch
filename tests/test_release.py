@@ -1,8 +1,10 @@
+import json
+
 import pytest
 
 from agent.config import Paths
 from agent.db import connect, now_utc, write_log
-from agent.release import ReleaseError, list_held, resolve
+from agent.release import ReleaseError, apply_review_requests, list_held, resolve
 
 
 @pytest.fixture
@@ -78,3 +80,26 @@ def test_resolve_already_decided_incident_raises(conn):
     resolve(conn, "inc-1", "released", "Pat")
     with pytest.raises(ReleaseError):
         resolve(conn, "inc-1", "rejected", "Alex")
+
+
+def test_resolve_rejects_an_unknown_decision_and_a_blank_reviewer(conn):
+    seed_held_import(conn)
+    with pytest.raises(ReleaseError):
+        resolve(conn, "inc-1", "approved", "Pat")
+    with pytest.raises(ReleaseError):
+        resolve(conn, "inc-1", "released", "   ")
+
+
+def test_apply_review_requests_is_idempotent_and_skips_bad_lines(conn):
+    seed_held_import(conn, "run-1", "inc-1")
+    lines = [
+        "not json",
+        json.dumps({"incident_id": "inc-1", "decision": "released", "reviewer": "Pat"}),
+        json.dumps({"incident_id": "inc-1", "decision": "rejected", "reviewer": "Alex"}),  # too late
+        json.dumps({"incident_id": "inc-missing", "decision": "released", "reviewer": "Pat"}),
+        json.dumps({"decision": "released"}),
+    ]
+    assert apply_review_requests(conn, lines) == ["inc-1"]
+    assert apply_review_requests(conn, lines) == []
+    row = conn.execute("SELECT status, decided_by FROM incident_log WHERE incident_id = 'inc-1'").fetchone()
+    assert (row["status"], row["decided_by"]) == ("released", "Pat")

@@ -4,15 +4,19 @@ from __future__ import annotations
 
 import json
 import sys
+import time
+import urllib.error
+from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import streamlit as st  # noqa: E402
 
-from agent.release import ReleaseError, list_held, resolve  # noqa: E402
-from dashboard.db import get_connection, write_connection  # noqa: E402
-from dashboard.flowchart import STEPS, build_flow_dot  # noqa: E402
+from agent.release import DECISIONS, ReleaseError, list_held, resolve  # noqa: E402
+from dashboard.cloud import dispatch_request, passcode_ok, send_dispatch  # noqa: E402
+from dashboard.db import CloudConfig, cloud_config, get_connection, write_connection  # noqa: E402
+from dashboard.flowchart import STEPS, build_flow_dot, replay_frame  # noqa: E402
 from dashboard.fmt import md  # noqa: E402
 from dashboard.live_run import (  # noqa: E402
     decision_outcome_for_run,
@@ -24,11 +28,17 @@ from dashboard.live_run import (  # noqa: E402
 )
 
 st.title("Live run")
-st.caption("Refreshes every 5 seconds. Locally each step logs the moment it starts, so this chart is truly live.")
+CLOUD = cloud_config()
+if CLOUD:
+    st.caption("Cloud mode: the pipeline runs in GitHub Actions and new data arrives about once a minute, "
+               "so the chart below is a **replay** of the latest run's logged steps, not a live view.")
+else:
+    st.caption("Refreshes every 5 seconds. Locally each step logs the moment it starts, so this chart is truly live.")
 
 conn = get_connection()
 if conn is None:
-    st.info("No database yet. Run the agent (`python -m agent.main`) to see a live run here.")
+    st.info("No data yet. Locally, run the agent (`python -m agent.main`); in the cloud, run the "
+            "`pipeline` workflow from the repo's Actions tab.")
     st.stop()
 
 
@@ -50,13 +60,7 @@ def live_section() -> None:
             + md(f"(cheapest nonstop ${held['cheapest_nonstop_usd']:.2f}) -- {held['detail']}"),
             icon="⚠️",
         )
-        name_col, release_col, reject_col = st.columns([3, 1, 1])
-        name = name_col.text_input("Your name", key=f"name-{held['incident_id']}",
-                                   label_visibility="collapsed", placeholder="Your name (required)")
-        if release_col.button("Release", key=f"release-{held['incident_id']}", disabled=not name):
-            _resolve(held["incident_id"], "released", name)
-        if reject_col.button("Reject", key=f"reject-{held['incident_id']}", disabled=not name):
-            _resolve(held["incident_id"], "rejected", name)
+        _review_controls(held["incident_id"])
         with st.expander(f"Why `{held['file_name']}` was held: the SQL and the formula"):
             held_sql = sql_log_for_run(conn, held["run_id"])
             _render_decide(stat_for_run(conn, held["run_id"]))
@@ -66,7 +70,15 @@ def live_section() -> None:
                     st.caption(md(f"{r['step']}  |  params: {r['params_json']}  |  {r['rows_affected']} row(s)"))
 
     st.subheader(f"Latest import: `{file_name}`")
-    st.graphviz_chart(build_flow_dot(step_rows, outcome), use_container_width=True)
+    if CLOUD:
+        finished = max((r["finished_at"] for r in step_rows.values() if r.get("finished_at")), default=None)
+        if finished:
+            ago = int((datetime.now(timezone.utc) - datetime.fromisoformat(finished)).total_seconds())
+            st.caption(f"Replay. This run finished at {finished} UTC, {ago} seconds ago.")
+        chart_rows, chart_outcome = replay_frame(step_rows, outcome, int(time.time() // 5))
+    else:
+        chart_rows, chart_outcome = step_rows, outcome
+    st.graphviz_chart(build_flow_dot(chart_rows, chart_outcome), use_container_width=True)
 
     sql_log = sql_log_for_run(conn, run_id)
     model_calls = model_calls_for_run(conn, run_id)
@@ -118,6 +130,48 @@ STEP_DESCRIPTIONS = {
     "decide": "Run the anomaly trigger: a z-score against the rolling mean of published imports.",
     "act": "Publish the import, or hold it and open an incident for a person to review.",
 }
+
+
+def _review_controls(incident_id: str) -> None:
+    """Release/Reject for one hold. Locally it writes through agent/release.py; in the cloud
+    it needs the reviewer passcode and starts review.yml, so visitors can watch but only the
+    reviewer can decide."""
+    sent = st.session_state.setdefault("sent_reviews", {})
+    if incident_id in sent:
+        st.info(f"{sent[incident_id]} -- sent to GitHub Actions. It shows here once the review workflow "
+                "(or the running pipeline's next minute) applies it, usually within a few minutes.")
+        return
+    if CLOUD and not (CLOUD.review_token and CLOUD.reviewer_passcode):
+        st.caption("Review is turned off: GH_REVIEW_TOKEN and REVIEWER_PASSCODE aren't set in Streamlit secrets.")
+        return
+
+    cols = st.columns([3, 2, 1, 1] if CLOUD else [3, 1, 1])
+    name = cols[0].text_input("Your name", key=f"name-{incident_id}", label_visibility="collapsed",
+                              placeholder="Your name (required)")
+    passcode = (cols[1].text_input("Reviewer passcode", key=f"code-{incident_id}", type="password",
+                                   label_visibility="collapsed", placeholder="Reviewer passcode")
+                if CLOUD else "")
+    release_col, reject_col = cols[-2], cols[-1]
+    for col, decision, label in ((release_col, DECISIONS[0], "Release"), (reject_col, DECISIONS[1], "Reject")):
+        if col.button(label, key=f"{decision}-{incident_id}", disabled=not name.strip()):
+            if CLOUD:
+                _dispatch(CLOUD, incident_id, decision, name.strip(), passcode)
+            else:
+                _resolve(incident_id, decision, name.strip())
+
+
+def _dispatch(cloud: CloudConfig, incident_id: str, decision: str, reviewer: str, passcode: str) -> None:
+    if not passcode_ok(passcode, cloud.reviewer_passcode):
+        st.session_state["flash"] = ("error", "Wrong reviewer passcode; nothing was sent.")
+        st.rerun()
+    try:
+        send_dispatch(dispatch_request(cloud.repo, cloud.review_token, incident_id, decision, reviewer))
+    except (urllib.error.URLError, RuntimeError) as exc:
+        st.session_state["flash"] = ("error", f"Couldn't start the review workflow: {exc}")
+        st.rerun()
+    st.session_state["sent_reviews"][incident_id] = f"{decision.capitalize()} by {reviewer}"
+    st.session_state["flash"] = ("success", f"{incident_id}: {decision} by {reviewer}, sent.")
+    st.rerun()
 
 
 def _resolve(incident_id: str, decision: str, decided_by: str) -> None:

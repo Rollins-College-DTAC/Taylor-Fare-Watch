@@ -1,0 +1,94 @@
+# A person's Release / Reject from the cloud dashboard. The app never edits the database:
+# it starts this workflow, which
+#   1. appends the request to the append-only `reviews` branch (never force-pushed, so a
+#      request can't be lost to the pipeline's minute-by-minute force-push of `data`), then
+#   2. applies it to the `data` branch, waiting its turn behind any running pipeline.
+# A running pipeline also applies new requests every minute. Applying is idempotent.
+name: review
+
+on:
+  workflow_dispatch:
+    inputs:
+      incident_id:
+        description: "Trigger incident ID, e.g. inc-1a2b3c4d"
+        required: true
+      decision:
+        description: "released or rejected"
+        required: true
+        type: choice
+        options: [released, rejected]
+      reviewer:
+        description: "Who decided"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  record:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      group: reviews
+      cancel-in-progress: false
+    env:
+      # Inputs reach the scripts only as environment variables, never pasted into a command.
+      INCIDENT_ID: ${{ inputs.incident_id }}
+      DECISION: ${{ inputs.decision }}
+      REVIEWER: ${{ inputs.reviewer }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure git for commits
+        run: |
+          git config --global user.name "review-bot"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Check out the reviews branch into reviews/
+        run: |
+          if git fetch origin reviews:reviews 2>/dev/null; then
+            git worktree add reviews reviews
+          else
+            git worktree add --orphan -b reviews reviews
+          fi
+
+      - name: Validate and append the request
+        run: python3 scripts/record_review.py reviews/reviews.jsonl
+
+      - name: Commit and push (retry if another review landed first)
+        working-directory: reviews
+        run: |
+          git add reviews.jsonl
+          git commit -q -m "review request"
+          for attempt in 1 2 3 4 5; do
+            if git push -q origin HEAD:reviews; then exit 0; fi
+            git pull -q --rebase origin reviews
+            sleep $((attempt * 2))
+          done
+          exit 1
+
+  apply:
+    needs: record
+    runs-on: ubuntu-latest
+    timeout-minutes: 60   # may queue behind a running pipeline
+    concurrency:
+      group: pipeline   # the same group as pipeline.yml: never write `data` alongside it
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure git for commits
+        run: |
+          git config --global user.name "review-bot"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Check out the data branch into state/
+        run: |
+          git fetch origin data:data
+          git worktree add state data
+
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --frozen
+
+      - name: Apply review requests to the data branch
+        run: uv run python scripts/apply_reviews.py --state state/

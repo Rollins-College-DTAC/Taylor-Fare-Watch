@@ -6,7 +6,7 @@ import pytest
 
 from agent.config import Paths
 from agent.db import connect
-from scripts.run_analytics import MIN_FORECAST_HISTORY, run
+from agent.analytics import MIN_FORECAST_HISTORY, run
 
 
 @pytest.fixture

@@ -26,10 +26,10 @@ def sql_for_run(conn: sqlite3.Connection, run_id: str) -> list[dict]:
     return [dict(r) for r in rows]
 
 
-def trigger_precision_recall(conn: sqlite3.Connection, generator_log_path: Path) -> dict | None:
+def trigger_precision_recall(conn: sqlite3.Connection, generator_log_path: Path | None) -> dict | None:
     """Join generator_log.csv's ground truth (is_anomaly) to decision_log's fired flag, by
     file name. Only covers imports the agent actually decided on."""
-    if not generator_log_path.exists():
+    if generator_log_path is None or not generator_log_path.exists():
         return None
     truth: dict[str, bool] = {}
     with generator_log_path.open(newline="", encoding="utf-8") as f:
