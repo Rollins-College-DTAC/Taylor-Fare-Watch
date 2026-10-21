@@ -7,7 +7,16 @@ import urllib.error
 import pytest
 
 from agent.config import PROJECT_ROOT, load_paths
-from dashboard.cloud import contents_request, dispatch_request, fetch_bytes, passcode_ok, send_dispatch
+from dashboard.cloud import (
+    REVIEW_WORKFLOW,
+    active_run,
+    contents_request,
+    fetch_bytes,
+    passcode_ok,
+    recent_runs_request,
+    send_dispatch,
+    workflow_dispatch_request,
+)
 from dashboard.db import local_path
 
 
@@ -43,7 +52,10 @@ def test_fetch_bytes_raises_on_other_errors():
 
 
 def test_dispatch_request_starts_review_yml_on_main_with_the_inputs():
-    req = dispatch_request("me/fare-watch", "tok", "inc-1a2b3c4d", "released", "Pat")
+    req = workflow_dispatch_request(
+        "me/fare-watch", "tok", REVIEW_WORKFLOW,
+        {"incident_id": "inc-1a2b3c4d", "decision": "released", "reviewer": "Pat"},
+    )
     assert req.full_url == "https://api.github.com/repos/me/fare-watch/actions/workflows/review.yml/dispatches"
     assert req.get_method() == "POST"
     assert json.loads(req.data) == {
@@ -65,3 +77,21 @@ def test_local_paths_mirror_the_data_branch_layout():
     assert local_path("analytics.sqlite") == load_paths().sqlite
     assert local_path("generator_log.csv") == PROJECT_ROOT / "generator_log.csv"
     assert local_path("exports/images/forecast.png") == PROJECT_ROOT / "docs" / "images" / "forecast.png"
+
+
+def test_pipeline_dispatch_sends_string_inputs():
+    req = workflow_dispatch_request("me/fare-watch", "tok", "pipeline.yml", {"minutes": "30", "kill_switch": "true"})
+    assert req.full_url.endswith("/actions/workflows/pipeline.yml/dispatches")
+    assert json.loads(req.data)["inputs"] == {"minutes": "30", "kill_switch": "true"}
+
+
+def test_active_run_finds_the_newest_unfinished_pipeline_run():
+    assert recent_runs_request("me/fare-watch", "tok").full_url == (
+        "https://api.github.com/repos/me/fare-watch/actions/workflows/pipeline.yml/runs?per_page=5"
+    )
+    runs = {"workflow_runs": [
+        {"status": "completed", "html_url": "u1", "created_at": "t1"},
+        {"status": "in_progress", "html_url": "u2", "created_at": "t2"},
+    ]}
+    assert active_run(json.dumps(runs).encode()) == {"status": "in_progress", "html_url": "u2", "created_at": "t2"}
+    assert active_run(json.dumps({"workflow_runs": [{"status": "completed", "html_url": "u", "created_at": "t"}]}).encode()) is None

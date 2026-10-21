@@ -35,7 +35,7 @@ to **only the fare-watch repository**:
 | Token | Repository permissions |
 |---|---|
 | `GH_DATA_TOKEN` | Contents: Read-only |
-| `GH_REVIEW_TOKEN` | Actions: Read and write |
+| `GH_ACTIONS_TOKEN` | Actions: Read and write (Release/Reject and the demo button) |
 
 ## 3. First pipeline run
 
@@ -53,7 +53,8 @@ the `data` branch. Check the run log shows one import per minute.
 ## 5. Demo run (the milestone's bar)
 
 1. Wake the app a few minutes before the demo (free apps sleep when nobody visits).
-2. Actions -> pipeline -> Run workflow, `minutes` = 15-30. With the kill switch off this
+2. In the app's sidebar, **Run 30-minute demo** (needs the reviewer passcode), or
+   Actions -> pipeline -> Run workflow, `minutes` = 15-30. With the kill switch off this
    spends class credits: roughly $0.50 an hour with Haiku (check current pricing); the
    agent's daily token cap in `config.toml` stops model calls if it's reached.
 3. Watch the public app update every minute. If an import is held, Release or Reject it

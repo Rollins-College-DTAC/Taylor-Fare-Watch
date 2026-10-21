@@ -17,6 +17,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # so `agent`/`dash
 
 import streamlit as st  # noqa: E402
 
+from dashboard.demo_panel import render_demo_panel  # noqa: E402
+
 st.set_page_config(page_title="Fare Watch", page_icon="✈️", layout="wide")
 
 PAGES_DIR = Path(__file__).resolve().parent / "pages"
@@ -30,4 +32,6 @@ pages = [
     st.Page(str(PAGES_DIR / "governance.py"), title="Governance", icon="\U0001F6E1️"),
 ]
 
-st.navigation(pages).run()
+navigation = st.navigation(pages)
+render_demo_panel()
+navigation.run()

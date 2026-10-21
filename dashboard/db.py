@@ -31,7 +31,7 @@ CACHE_DIR = Path(tempfile.gettempdir()) / "farewatch-dashboard"
 class CloudConfig:
     repo: str
     data_token: str
-    review_token: str | None
+    actions_token: str | None
     reviewer_passcode: str | None
 
 
@@ -47,7 +47,7 @@ def cloud_config() -> CloudConfig | None:
     repo, token = _secret("GH_REPO"), _secret("GH_DATA_TOKEN")
     if not (repo and token):
         return None
-    return CloudConfig(repo, token, _secret("GH_REVIEW_TOKEN"), _secret("REVIEWER_PASSCODE"))
+    return CloudConfig(repo, token, _secret("GH_ACTIONS_TOKEN"), _secret("REVIEWER_PASSCODE"))
 
 
 def local_path(name: str) -> Path:

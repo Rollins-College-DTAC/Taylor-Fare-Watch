@@ -14,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import streamlit as st  # noqa: E402
 
 from agent.release import DECISIONS, ReleaseError, list_held, resolve  # noqa: E402
-from dashboard.cloud import dispatch_request, passcode_ok, send_dispatch  # noqa: E402
+from dashboard.cloud import REVIEW_WORKFLOW, passcode_ok, send_dispatch, workflow_dispatch_request  # noqa: E402
 from dashboard.db import CloudConfig, cloud_config, get_connection, write_connection  # noqa: E402
 from dashboard.flowchart import STEPS, build_flow_dot, replay_frame  # noqa: E402
 from dashboard.fmt import md  # noqa: E402
@@ -141,8 +141,8 @@ def _review_controls(incident_id: str) -> None:
         st.info(f"{sent[incident_id]} -- sent to GitHub Actions. It shows here once the review workflow "
                 "(or the running pipeline's next minute) applies it, usually within a few minutes.")
         return
-    if CLOUD and not (CLOUD.review_token and CLOUD.reviewer_passcode):
-        st.caption("Review is turned off: GH_REVIEW_TOKEN and REVIEWER_PASSCODE aren't set in Streamlit secrets.")
+    if CLOUD and not (CLOUD.actions_token and CLOUD.reviewer_passcode):
+        st.caption("Review is turned off: GH_ACTIONS_TOKEN and REVIEWER_PASSCODE aren't set in Streamlit secrets.")
         return
 
     cols = st.columns([3, 2, 1, 1] if CLOUD else [3, 1, 1])
@@ -165,7 +165,10 @@ def _dispatch(cloud: CloudConfig, incident_id: str, decision: str, reviewer: str
         st.session_state["flash"] = ("error", "Wrong reviewer passcode; nothing was sent.")
         st.rerun()
     try:
-        send_dispatch(dispatch_request(cloud.repo, cloud.review_token, incident_id, decision, reviewer))
+        send_dispatch(workflow_dispatch_request(
+            cloud.repo, cloud.actions_token, REVIEW_WORKFLOW,
+            {"incident_id": incident_id, "decision": decision, "reviewer": reviewer},
+        ))
     except (urllib.error.URLError, RuntimeError) as exc:
         st.session_state["flash"] = ("error", f"Couldn't start the review workflow: {exc}")
         st.rerun()
