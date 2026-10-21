@@ -1,9 +1,13 @@
-"""ETL steps 1 and 2: Detect and Land.
+"""ETL steps: Detect, Land, Redact, Classify, Extract, Validate.
 
 Detect hashes each new file and skips any content seen before, whatever its name.
 Land stores every record exactly as it arrived in TinyDB (the raw, or bronze, layer) and
 moves the file to processed/. Files that cannot be parsed go to quarantine/ with an
-incident; nothing is ever deleted.
+incident; nothing is ever deleted. Redact masks personal data before any model sees a
+record. Classify and Extract route each record through the MoE router (agent/router.py)
+to the rules expert or Claude; Validate collects the results, sends records that tried to
+give instructions or that never passed Pydantic validation to review_queue or quarantine,
+and leaves everything else ready for Load (Milestone 4).
 """
 
 from __future__ import annotations
@@ -17,14 +21,21 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
+from anthropic import Anthropic
 from tinydb import TinyDB
 
-from agent.config import Paths
-from agent.db import RunContext, now_utc
+from agent.config import Paths, Settings
+from agent.db import RunContext, now_utc, write_log
+from agent.experts import claude_expert
+from agent.redact import redact_record
+from agent.reference import field
 from agent.runlog import open_incident, step
 
 IMPORT_SUFFIXES = (".csv", ".json")
 RAW_TABLE = "quotes_raw"
+REDACTED_TABLE = "quotes_redacted"
+VALIDATED_TABLE = "quotes_validated"
+QUARANTINED_TABLE = "quotes_quarantined"
 
 
 def new_run_id() -> str:
@@ -73,8 +84,123 @@ def parse_records(path: Path) -> tuple[list[dict], str]:
     return records, feed
 
 
-def process_file(path: Path, paths: Paths, conn: sqlite3.Connection, raw_db: TinyDB) -> dict:
-    """Run Detect and Land for one file. Returns a short outcome for printing."""
+def open_review(ctx: RunContext, task: str, row_index: int, record: dict, confidence: float, reason: str) -> str:
+    """A person decides later whether a low-confidence record is fine as-is."""
+    review_id = f"rev-{uuid.uuid4().hex[:8]}"
+    write_log(ctx.conn, "review_queue", {
+        "review_id": review_id, "run_id": ctx.run_id, "file_name": ctx.file_name, "row_index": row_index,
+        "task": task, "reason": reason, "confidence": confidence,
+        "record_json": json.dumps(record, ensure_ascii=False),
+        "status": "open", "opened_at": now_utc(), "closed_at": None, "resolved_by": None,
+    })
+    return review_id
+
+
+def redact_step(ctx: RunContext, raw_db: TinyDB, records: list[dict]) -> list[dict]:
+    """Mask personal data in free-text notes before any model sees a record."""
+    with step(ctx, "redact") as s:
+        redacted, masked_total = [], 0
+        for record in records:
+            clean, n = redact_record(record)
+            redacted.append(clean)
+            masked_total += n
+        raw_db.table(REDACTED_TABLE).insert_multiple(
+            {"run_id": ctx.run_id, "file_name": ctx.file_name, "row_index": i, "record": r}
+            for i, r in enumerate(redacted)
+        )
+        s.rows_in = s.rows_out = len(records)
+        s.message = f"masked {masked_total} personal-data item(s) across {len(records)} record(s)"
+    return redacted
+
+
+def classify_step(
+    ctx: RunContext, settings: Settings, client: Anthropic | None, redacted: list[dict]
+) -> tuple[list, set[int]]:
+    """Route each record's note through the MoE router; flag injections and low-confidence calls."""
+    with step(ctx, "classify") as s:
+        results, injected = [], set()
+        for i, record in enumerate(redacted):
+            note = str(field(record, "note") or "")
+            result = claude_expert.run_classification(ctx, client, settings, note)
+            results.append(result)
+            if result.injection:
+                injected.add(i)
+            elif result.category_confidence < settings.category_confidence_min:
+                open_review(
+                    ctx, "classify", i, record, result.category_confidence,
+                    f"category confidence {result.category_confidence:.2f} below "
+                    f"{settings.category_confidence_min}",
+                )
+        s.rows_in = s.rows_out = len(redacted)
+        s.rows_rejected = len(injected)
+        s.message = f"classified {len(redacted)} record(s); {len(injected)} flagged as prompt injection"
+        if injected:
+            open_incident(ctx, "injection", f"{len(injected)} record(s) tried to give the agent instructions")
+    return results, injected
+
+
+def extract_step(
+    ctx: RunContext, settings: Settings, client: Anthropic | None, redacted: list[dict], skip: set[int]
+) -> dict[int, "claude_expert.ExtractionResult"]:
+    """Pull structured values out of every record that was not already flagged as an injection."""
+    with step(ctx, "extract") as s:
+        results, quarantined = {}, 0
+        for i, record in enumerate(redacted):
+            if i in skip:
+                continue
+            result = claude_expert.run_extraction(ctx, client, settings, record)
+            results[i] = result
+            if result.outcome == "quarantined":
+                quarantined += 1
+        s.rows_in = len(redacted) - len(skip)
+        s.rows_out = s.rows_in - quarantined
+        s.rows_rejected = quarantined
+        s.message = f"extracted {s.rows_out} of {s.rows_in} record(s); {quarantined} failed validation twice"
+    return results
+
+
+def validate_step(
+    ctx: RunContext, raw_db: TinyDB, redacted: list[dict], classifications: list,
+    extractions: dict[int, "claude_expert.ExtractionResult"], injected: set[int],
+) -> tuple[int, int]:
+    """Collect Classify and Extract outcomes: ready rows go on to Load, the rest are quarantined."""
+    with step(ctx, "validate") as s:
+        validated, quarantined = [], []
+        for i, record in enumerate(redacted):
+            if i in injected:
+                quarantined.append({"row_index": i, "record": record, "reason": "prompt injection"})
+                continue
+            extraction = extractions.get(i)
+            if extraction is None or extraction.data is None:
+                quarantined.append({"row_index": i, "record": record, "reason": "failed extraction validation"})
+                continue
+            validated.append({
+                "row_index": i,
+                "extraction": extraction.data.model_dump(mode="json"),
+                "extract_outcome": extraction.outcome,
+                "classification": classifications[i].model_dump(),
+            })
+        if validated:
+            raw_db.table(VALIDATED_TABLE).insert_multiple(
+                {"run_id": ctx.run_id, "file_name": ctx.file_name, **v} for v in validated
+            )
+        if quarantined:
+            raw_db.table(QUARANTINED_TABLE).insert_multiple(
+                {"run_id": ctx.run_id, "file_name": ctx.file_name, **q} for q in quarantined
+            )
+            open_incident(ctx, "failure", f"{len(quarantined)} record(s) quarantined after validation")
+        s.rows_in = len(redacted)
+        s.rows_out = len(validated)
+        s.rows_rejected = len(quarantined)
+        s.message = f"validated {len(validated)} of {len(redacted)} record(s); {len(quarantined)} quarantined"
+    return len(validated), len(quarantined)
+
+
+def process_file(
+    path: Path, paths: Paths, conn: sqlite3.Connection, raw_db: TinyDB,
+    settings: Settings, client: Anthropic | None = None,
+) -> dict:
+    """Run one file through Detect, Land, Redact, Classify, Extract and Validate."""
     ctx = RunContext(conn, new_run_id(), path.name)
     outcome = {"run_id": ctx.run_id, "file_name": path.name}
 
@@ -123,8 +249,19 @@ def process_file(path: Path, paths: Paths, conn: sqlite3.Connection, raw_db: Tin
         s.rows_in = s.rows_out = len(records)
         s.message = (f"landed {len(records)} raw records in TinyDB {RAW_TABLE}; "
                      f"moved to {paths.processed.name}/{dest.name}")
-        return {**outcome, "status": "landed", "message": s.message}
+
+    redacted = redact_step(ctx, raw_db, records)
+    classifications, injected = classify_step(ctx, settings, client, redacted)
+    extractions = extract_step(ctx, settings, client, redacted, injected)
+    validated, quarantined = validate_step(ctx, raw_db, redacted, classifications, extractions, injected)
+
+    message = (f"landed {len(records)} record(s); moved to {paths.processed.name}/{dest.name}; "
+               f"{validated} validated, {quarantined} quarantined")
+    return {**outcome, "status": "landed", "message": message}
 
 
-def scan_inbox(paths: Paths, conn: sqlite3.Connection, raw_db: TinyDB) -> list[dict]:
-    return [process_file(p, paths, conn, raw_db) for p in pending_files(paths.inbox)]
+def scan_inbox(
+    paths: Paths, conn: sqlite3.Connection, raw_db: TinyDB,
+    settings: Settings, client: Anthropic | None = None,
+) -> list[dict]:
+    return [process_file(p, paths, conn, raw_db, settings, client) for p in pending_files(paths.inbox)]

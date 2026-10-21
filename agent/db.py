@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import time
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -46,6 +47,15 @@ CREATE TABLE IF NOT EXISTS incident_log (
 CREATE TABLE IF NOT EXISTS seen_files (
   file_sha256 TEXT PRIMARY KEY, file_name TEXT, run_id TEXT, first_seen_at TEXT
 );
+CREATE TABLE IF NOT EXISTS review_queue (
+  review_id TEXT PRIMARY KEY, run_id TEXT, file_name TEXT, row_index INTEGER,
+  task TEXT, reason TEXT, confidence REAL, record_json TEXT,
+  status TEXT, opened_at TEXT, closed_at TEXT, resolved_by TEXT
+);
+CREATE TABLE IF NOT EXISTS model_cache (
+  cache_key TEXT PRIMARY KEY, task TEXT, expert TEXT, prompt_version TEXT,
+  response_json TEXT, input_tokens INTEGER, output_tokens INTEGER, created_at TEXT
+);
 """
 
 MAX_LOGGED_TEXT = 80  # long text values are shortened in sql_log
@@ -69,6 +79,17 @@ def write_log(conn: sqlite3.Connection, table: str, row: dict) -> int:
     cols = ", ".join(row)
     marks = ", ".join("?" for _ in row)
     return conn.execute(f"INSERT INTO {table} ({cols}) VALUES ({marks})", list(row.values())).lastrowid
+
+
+def tokens_used_today(conn: sqlite3.Connection) -> int:
+    """Input + output tokens already logged today (UTC), for the daily budget cap."""
+    today = now_utc()[:10]
+    row = conn.execute(
+        "SELECT COALESCE(SUM(input_tokens), 0) + COALESCE(SUM(output_tokens), 0) AS total "
+        "FROM model_usage_log WHERE substr(called_at, 1, 10) = ?",
+        (today,),
+    ).fetchone()
+    return row["total"]
 
 
 def _shorten(value):
@@ -101,3 +122,21 @@ class RunContext:
             "executed_at": now_utc(),
         })
         return rows
+
+    def log_model_call(
+        self, step: str, task: str, expert: str, route_reason: str, *,
+        prompt_version: str = "", input_tokens: int = 0, output_tokens: int = 0,
+        latency_ms: int = 0, confidence: float | None = None,
+        estimated_cost_usd: float = 0.0, pii_redacted: bool = False, outcome: str = "valid",
+    ) -> str:
+        """Record one expert call in model_usage_log. Returns the generated call_id."""
+        call_id = f"call-{uuid.uuid4().hex[:12]}"
+        write_log(self.conn, "model_usage_log", {
+            "call_id": call_id, "run_id": self.run_id, "step": step, "task": task,
+            "expert": expert, "route_reason": route_reason, "prompt_version": prompt_version,
+            "input_tokens": input_tokens, "output_tokens": output_tokens,
+            "latency_ms": latency_ms, "confidence": confidence,
+            "estimated_cost_usd": estimated_cost_usd, "pii_redacted": int(pii_redacted),
+            "outcome": outcome, "called_at": now_utc(),
+        })
+        return call_id

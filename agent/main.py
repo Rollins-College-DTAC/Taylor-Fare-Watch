@@ -14,20 +14,23 @@ from __future__ import annotations
 import argparse
 from datetime import datetime, timedelta
 
+from anthropic import Anthropic
 from apscheduler.schedulers.blocking import BlockingScheduler
 from tinydb import TinyDB
 
-from agent.config import SCAN_SECONDS, Paths, load_paths
+from agent.config import SCAN_SECONDS, Paths, anthropic_client_kwargs, load_paths, load_settings
 from agent.db import connect
 from agent.etl import scan_inbox
 
 
 def scan_once(paths: Paths | None = None) -> list[dict]:
     paths = paths or load_paths()
+    settings = load_settings()
+    client = None if settings.kill_switch else Anthropic(**anthropic_client_kwargs())
     conn = connect(paths.sqlite)
     try:
         with TinyDB(paths.raw_json, encoding="utf-8", ensure_ascii=False, indent=1) as raw_db:
-            outcomes = scan_inbox(paths, conn, raw_db)
+            outcomes = scan_inbox(paths, conn, raw_db, settings, client)
     finally:
         conn.close()
     for o in outcomes:

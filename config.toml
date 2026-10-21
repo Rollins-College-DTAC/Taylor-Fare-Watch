@@ -1,0 +1,23 @@
+# Fare Watch agent settings. No secrets here: API keys live only in .env.
+# Environment variables override these (see agent/config.py).
+
+[models]
+# Model names come from config, never from code, because they change.
+extract = "claude-haiku-4-5"      # first-pass extraction (and classification when Jev is unavailable)
+escalate = "claude-sonnet-5-5"    # re-extraction when Haiku is unsure, and plain-English explanations
+jev_enabled = false               # set true once Jev (TypeSafe) access and its client are set up
+
+[prompts]
+extract = "extract_v1.md"
+jev_questions = "jev_questions_v1.json"
+
+[limits]
+kill_switch = false               # true: no model calls at all, rules only
+max_tokens_per_run = 20000        # one import file
+max_tokens_per_day = 400000
+category_confidence_min = 0.6     # below this, the record goes to the review queue
+
+[reference]
+mxn_per_usd = 18.0                # fixed simulated rate; conversion happens in Python, not in a model
+departure_year = 2027
+departure_month = 4

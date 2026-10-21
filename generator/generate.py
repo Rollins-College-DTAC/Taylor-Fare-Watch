@@ -36,7 +36,8 @@ FILE_PREFIX = "farewatch"
 
 LOG_COLUMNS = [
     "import_seq", "file_name", "format", "written_at", "records", "nonstop_quotes",
-    "cheapest_nonstop_usd", "is_anomaly", "anomaly_type", "duplicate_rows", "resend_of",
+    "cheapest_nonstop_usd", "is_anomaly", "anomaly_type", "duplicate_rows", "injection_rows",
+    "resend_of",
 ]
 CSV_COLUMNS = [
     "quote_id", "carrier", "flight_no", "origin", "destination", "depart_date", "return_date",
@@ -147,7 +148,7 @@ def write_one(
             "import_seq": "", "file_name": copy.name, "format": source.suffix[1:],
             "written_at": now.isoformat(timespec="seconds"), "records": "", "nonstop_quotes": "",
             "cheapest_nonstop_usd": "", "is_anomaly": "", "anomaly_type": "",
-            "duplicate_rows": "", "resend_of": source.name,
+            "duplicate_rows": "", "injection_rows": "", "resend_of": source.name,
         })
         written.append(copy)
         print(f"[generator] {now:%H:%M:%S} wrote {copy.name} (re-sent copy of {source.name})", flush=True)
