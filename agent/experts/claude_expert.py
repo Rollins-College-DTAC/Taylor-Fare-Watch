@@ -239,18 +239,25 @@ def run_classification(ctx: RunContext, client: Anthropic, settings: Settings, n
         ctx.log_model_call("classify", "classify", "rules", reason, confidence=result.category_confidence, outcome="valid")
         return result
 
+    prompt_version = _prompt_version(settings.jev_questions)
+    questions = json.loads((PROMPTS_DIR / settings.jev_questions).read_text(encoding="utf-8"))
     probs = None
     if expert == "jev":
-        try:
-            probs = jev_expert.answer(note)
-        except jev_expert.JevUnavailable as exc:
-            expert, reason = settings.extract_model, f"Jev unavailable ({exc}); falling back to the extractor"
+        key = cache_key("classify", "jev", prompt_version, note)
+        cached = _cached(ctx, key)
+        if cached:
+            probs, in_tok, out_tok, latency = cached["data"], cached["input_tokens"], cached["output_tokens"], 0
+        else:
+            try:
+                reply = jev_expert.answer(note, questions, settings.jev_model)
+            except jev_expert.JevUnavailable as exc:
+                expert, reason = settings.extract_model, f"Jev unavailable ({exc}); falling back to the extractor"
+            else:
+                probs, in_tok, out_tok, latency = reply.probs, reply.input_tokens, reply.output_tokens, reply.latency_ms
+                reason = f"{reason} ({reply.model})"
+                _store_cache(ctx, key, "classify", "jev", prompt_version, probs, in_tok, out_tok)
 
-    prompt_version = _prompt_version(settings.jev_questions)
-    if probs is not None:
-        in_tok = out_tok = latency = 0
-    else:
-        questions = json.loads((PROMPTS_DIR / settings.jev_questions).read_text(encoding="utf-8"))
+    if probs is None:
         key = cache_key("classify", expert, prompt_version, note)
         cached = _cached(ctx, key)
         if cached:

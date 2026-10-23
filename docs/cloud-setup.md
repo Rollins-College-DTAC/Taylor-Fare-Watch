@@ -23,6 +23,7 @@ repository.
    |---|---|
    | `ANTHROPIC_API_KEY` | Your class Claude Console key |
    | `ANTHROPIC_WORKSPACE_ID` | Your Console workspace ID (only if your key needs it) |
+   | `TYPESAFE_API_KEY` | Your Jev key from console.typesafe.ai/keys (optional; without it Claude classifies) |
 
 5. Settings -> Actions -> General -> Workflow permissions: **Read and write permissions**
    (the pipeline pushes the `data` branch with the built-in token).

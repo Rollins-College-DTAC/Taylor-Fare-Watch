@@ -80,6 +80,7 @@ class Settings:
     mxn_per_usd: float
     departure_year: int
     departure_month: int
+    jev_model: str = "jev-latest"
 
 
 def load_settings(path: Path | None = None) -> Settings:
@@ -100,4 +101,5 @@ def load_settings(path: Path | None = None) -> Settings:
         mxn_per_usd=ref["mxn_per_usd"],
         departure_year=ref["departure_year"],
         departure_month=ref["departure_month"],
+        jev_model=models["jev"],
     )

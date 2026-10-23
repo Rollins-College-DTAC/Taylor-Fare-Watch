@@ -32,6 +32,7 @@ jobs:
     env:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       ANTHROPIC_WORKSPACE_ID: ${{ secrets.ANTHROPIC_WORKSPACE_ID }}
+      TYPESAFE_API_KEY: ${{ secrets.TYPESAFE_API_KEY }}
       MINUTES: ${{ inputs.minutes || '5' }}
       FAREWATCH_KILL_SWITCH: ${{ inputs.kill_switch && '1' || '0' }}
     steps:

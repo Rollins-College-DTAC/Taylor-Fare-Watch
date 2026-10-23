@@ -5,7 +5,8 @@
 # Model names come from config, never from code, because they change.
 extract = "claude-haiku-4-5"      # first-pass extraction (and classification when Jev is unavailable)
 escalate = "claude-sonnet-5-5"    # re-extraction when Haiku is unsure, and plain-English explanations
-jev_enabled = false               # set true once Jev (TypeSafe) access and its client are set up
+jev = "jev-latest"                # TypeSafe alias; the version that answered is logged in route_reason
+jev_enabled = true                # without TYPESAFE_API_KEY, classify falls back to the extractor
 
 [prompts]
 extract = "extract_v2.md"         # v1 missed the "LK 330" -> "LK330" flight-number normalization

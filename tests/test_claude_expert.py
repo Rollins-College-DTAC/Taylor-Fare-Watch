@@ -164,8 +164,8 @@ def test_classify_uses_rules_when_kill_switch_is_on(ctx):
 
 
 def test_classify_falls_back_to_claude_when_jev_is_unavailable(ctx, monkeypatch):
-    def raise_unavailable(note):
-        raise jev_expert.JevUnavailable("no client configured")
+    def raise_unavailable(*args):
+        raise jev_expert.JevUnavailable("TYPESAFE_API_KEY is not set")
 
     monkeypatch.setattr(jev_expert, "answer", raise_unavailable)
     probs = {
@@ -180,3 +180,27 @@ def test_classify_falls_back_to_claude_when_jev_is_unavailable(ctx, monkeypatch)
     row = usage_rows(ctx)[0]
     assert row["expert"] == "claude-haiku-4-5"
     assert "Jev unavailable" in row["route_reason"]
+
+
+def test_classify_uses_jev_when_enabled_and_caches_it(ctx, monkeypatch):
+    calls = []
+
+    def fake_answer(note, questions, model):
+        calls.append(model)
+        probs = {
+            "category_probs": {c: (0.9 if c == "scarcity" else 0.02) for c in CATEGORIES},
+            "urgency_probs": {"low": 0.05, "medium": 0.05, "high": 0.15, "critical": 0.75},
+            "injection_probs": {"true": 0.02, "false": 0.98},
+        }
+        return jev_expert.JevReply(probs, "jev-1.13.0", input_tokens=180, output_tokens=12, latency_ms=40)
+
+    monkeypatch.setattr(jev_expert, "answer", fake_answer)
+    first = claude_expert.run_classification(ctx, None, settings(jev_enabled=True), "Only 2 seats left")
+    second = claude_expert.run_classification(ctx, None, settings(jev_enabled=True), "Only 2 seats left")
+    assert first == second
+    assert (first.category, first.urgency, first.injection) == ("scarcity", "critical", False)
+    assert calls == ["jev-latest"]  # the second call came from model_cache
+    rows = usage_rows(ctx)
+    assert [r["expert"] for r in rows] == ["jev", "jev"]
+    assert "jev-1.13.0" in rows[0]["route_reason"]
+    assert (rows[0]["input_tokens"], rows[0]["latency_ms"]) == (180, 40)
