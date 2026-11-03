@@ -69,7 +69,9 @@ def anthropic_client_kwargs() -> dict:
 def turso_credentials() -> tuple[str, str] | None:
     """(TURSO_DATABASE_URL, TURSO_AUTH_TOKEN) when both are set; then the agent uses Turso for
     both stores (agent/turso.py) instead of data/analytics.sqlite and data/raw.json."""
-    url, token = os.environ.get("TURSO_DATABASE_URL"), os.environ.get("TURSO_AUTH_TOKEN")
+    # strip(): a secret pasted into GitHub or Streamlit often ends in a newline, which no HTTP header accepts
+    url = os.environ.get("TURSO_DATABASE_URL", "").strip()
+    token = os.environ.get("TURSO_AUTH_TOKEN", "").strip()
     return (url, token) if url and token else None
 
 

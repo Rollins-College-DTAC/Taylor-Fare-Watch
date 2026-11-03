@@ -95,7 +95,7 @@ def read_only_connection(path_str: str) -> sqlite3.Connection:
 
 
 def _turso_credentials() -> tuple[str, str] | None:
-    url, token = _secret("TURSO_DATABASE_URL"), _secret("TURSO_AUTH_TOKEN")
+    url, token = (_secret("TURSO_DATABASE_URL") or "").strip(), (_secret("TURSO_AUTH_TOKEN") or "").strip()
     return (url, token) if url and token else turso_credentials()
 
 

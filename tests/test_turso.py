@@ -127,3 +127,11 @@ def test_local_files_without_turso_keys(monkeypatch, tmp_path):
     conn = open_db(Paths.under(tmp_path).sqlite)
     assert isinstance(conn, sqlite3.Connection)
     conn.close()
+
+
+def test_credentials_pasted_with_a_trailing_newline_are_stripped(monkeypatch):
+    from agent.config import turso_credentials
+
+    monkeypatch.setenv("TURSO_DATABASE_URL", "libsql://db.turso.io\n")
+    monkeypatch.setenv("TURSO_AUTH_TOKEN", " token\n")
+    assert turso_credentials() == ("libsql://db.turso.io", "token")
