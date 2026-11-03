@@ -74,6 +74,9 @@ jobs:
     concurrency:
       group: pipeline   # the same group as pipeline.yml: never write `data` alongside it
       cancel-in-progress: false
+    env:
+      TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
+      TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
     steps:
       - uses: actions/checkout@v4
 

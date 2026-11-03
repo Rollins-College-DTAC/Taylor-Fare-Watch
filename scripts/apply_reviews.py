@@ -15,8 +15,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # so `agent` imports from scripts/
 
 from agent.cloud_state import commit_and_push, fetch_review_requests, prepare_for_commit  # noqa: E402
-from agent.config import PROJECT_ROOT  # noqa: E402
-from agent.db import connect  # noqa: E402
+from agent.config import PROJECT_ROOT, turso_credentials  # noqa: E402
+from agent.db import open_db  # noqa: E402
 from agent.release import apply_review_requests  # noqa: E402
 
 
@@ -26,9 +26,10 @@ def main() -> None:
     args = parser.parse_args()
 
     db_path = args.state / "analytics.sqlite"
-    if not db_path.exists():
+    on_turso = turso_credentials() is not None
+    if not on_turso and not db_path.exists():
         sys.exit(f"no database at {db_path}; has the pipeline run yet?")
-    conn = connect(db_path)
+    conn = open_db(db_path)
     try:
         applied = apply_review_requests(conn, fetch_review_requests(PROJECT_ROOT))
     finally:
@@ -36,8 +37,9 @@ def main() -> None:
     if not applied:
         print("nothing new to apply (already decided by a running pipeline, or not a held incident)")
         return
-    prepare_for_commit(db_path)
-    commit_and_push(args.state, f"data: applied reviews {', '.join(applied)}")
+    if not on_turso:  # on Turso the decision is already stored; nothing to commit to `data`
+        prepare_for_commit(db_path)
+        commit_and_push(args.state, f"data: applied reviews {', '.join(applied)}")
     print(f"applied: {', '.join(applied)}")
 
 

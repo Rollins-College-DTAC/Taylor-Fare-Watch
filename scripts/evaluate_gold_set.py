@@ -21,7 +21,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # so `agent` imports from scripts/
 
 from agent.config import load_paths, load_settings  # noqa: E402
-from agent.db import connect, now_utc, write_log, RunContext  # noqa: E402
+from agent.db import connect, now_utc, open_db, write_log, RunContext  # noqa: E402
 from agent.experts import claude_expert, rules  # noqa: E402
 from agent.models import QuoteClassification, QuoteExtraction  # noqa: E402
 from agent.redact import redact_record  # noqa: E402
@@ -207,7 +207,7 @@ def log_gold_set_score(
 ) -> None:
     """One summary row in the production stats_log, for the Governance page -- not the raw
     per-record model calls, which stay in the isolated eval db (data/gold_set_eval.sqlite)."""
-    conn = connect(load_paths().sqlite)
+    conn = open_db(load_paths().sqlite)
     try:
         write_log(conn, "stats_log", {
             "run_id": f"run-goldset-score-{datetime.now(timezone.utc):%Y%m%dT%H%M%S}",

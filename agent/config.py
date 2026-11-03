@@ -66,6 +66,13 @@ def anthropic_client_kwargs() -> dict:
     return {"default_headers": {"anthropic-workspace-id": workspace_id}} if workspace_id else {}
 
 
+def turso_credentials() -> tuple[str, str] | None:
+    """(TURSO_DATABASE_URL, TURSO_AUTH_TOKEN) when both are set; then the agent uses Turso for
+    both stores (agent/turso.py) instead of data/analytics.sqlite and data/raw.json."""
+    url, token = os.environ.get("TURSO_DATABASE_URL"), os.environ.get("TURSO_AUTH_TOKEN")
+    return (url, token) if url and token else None
+
+
 @dataclass(frozen=True)
 class Settings:
     extract_model: str

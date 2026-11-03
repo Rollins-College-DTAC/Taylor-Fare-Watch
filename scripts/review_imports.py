@@ -16,8 +16,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # so `agent` imports from scripts/
 
-from agent.config import load_paths  # noqa: E402
-from agent.db import connect  # noqa: E402
+from agent.config import load_paths, turso_credentials  # noqa: E402
+from agent.db import open_db  # noqa: E402
 from agent.release import ReleaseError, list_held, resolve  # noqa: E402
 
 
@@ -31,9 +31,9 @@ def main() -> None:
     args = parser.parse_args()
 
     db_path = load_paths().sqlite
-    if not db_path.exists():
+    if turso_credentials() is None and not db_path.exists():
         sys.exit(f"No database yet at {db_path}. Run the agent first.")
-    conn = connect(db_path)
+    conn = open_db(db_path)
     try:
         if args.action in ("release", "reject"):
             decision = "released" if args.action == "release" else "rejected"

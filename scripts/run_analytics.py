@@ -14,13 +14,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # so `agent` impor
 
 from agent.analytics import run  # noqa: E402
 from agent.config import load_paths  # noqa: E402
-from agent.db import connect  # noqa: E402
+from agent.db import open_db  # noqa: E402
 
 IMAGES_DIR = Path(__file__).resolve().parents[1] / "docs" / "images"
 
 
 def main() -> None:
-    conn = connect(load_paths().sqlite)
+    conn = open_db(load_paths().sqlite)
     try:
         if not run(conn, IMAGES_DIR):
             sys.exit("No gold quotes yet -- run the agent first.")

@@ -14,7 +14,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # so `agent` imports from scripts/
 
-from agent.config import load_paths  # noqa: E402
+from agent.config import load_paths, turso_credentials  # noqa: E402
+from agent.db import open_db  # noqa: E402
 
 RUN_COLUMNS = ["started_at", "step", "file_name", "status", "rows_out", "message"]
 SQL_COLUMNS = ["executed_at", "step", "file_name", "sql_text", "params_json", "rows_affected"]
@@ -40,10 +41,13 @@ def main() -> None:
     args = parser.parse_args()
 
     db_path = load_paths().sqlite
-    if not db_path.exists():
-        sys.exit(f"No database yet at {db_path}. Run the agent first.")
-    conn = sqlite3.connect(f"{db_path.resolve().as_uri()}?mode=ro", uri=True)  # read-only: only the agent writes
-    conn.row_factory = sqlite3.Row
+    if turso_credentials() is not None:
+        conn = open_db(db_path)
+    else:
+        if not db_path.exists():
+            sys.exit(f"No database yet at {db_path}. Run the agent first.")
+        conn = sqlite3.connect(f"{db_path.resolve().as_uri()}?mode=ro", uri=True)  # read-only: only the agent writes
+        conn.row_factory = sqlite3.Row
     for table, columns in [("run_log", RUN_COLUMNS), ("sql_log", SQL_COLUMNS)]:
         rows = conn.execute(
             f"SELECT * FROM (SELECT rowid AS r, * FROM {table} ORDER BY r DESC LIMIT ?) ORDER BY r", (args.n,)

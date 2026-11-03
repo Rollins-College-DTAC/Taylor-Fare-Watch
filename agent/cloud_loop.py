@@ -22,12 +22,11 @@ from datetime import datetime
 from pathlib import Path
 
 from anthropic import Anthropic
-from tinydb import TinyDB
 
 from agent import analytics
 from agent.cloud_state import commit_and_push, fetch_review_requests, prepare_for_commit
 from agent.config import PROJECT_ROOT, Paths, Settings, anthropic_client_kwargs, load_settings
-from agent.db import connect
+from agent.db import open_db, open_raw_store
 from agent.etl import scan_inbox
 from agent.export import write_daily_summary
 from agent.release import apply_review_requests
@@ -50,9 +49,9 @@ def tick(
     log_path = paths.data_dir / "generator_log.csv"
     generate.write_one(generate.next_seq(log_path), datetime.now(), paths.inbox, log_path, paths.processed, seed)
 
-    conn = connect(paths.sqlite)
+    conn = open_db(paths.sqlite)
     try:
-        with TinyDB(paths.raw_json, encoding="utf-8", ensure_ascii=False, indent=1) as raw_db:
+        with open_raw_store(paths.raw_json, conn) as raw_db:
             outcomes = scan_inbox(paths, conn, raw_db, settings, client)
         applied = apply_review_requests(conn, fetch_review_requests(repo_dir))
         analytics.run(conn, paths.data_dir / "exports" / "images")

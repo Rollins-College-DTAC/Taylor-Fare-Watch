@@ -4,6 +4,10 @@
 - Cloud (Streamlit secrets GH_REPO and GH_DATA_TOKEN set): the same files downloaded from
   the repo's `data` branch every 30 seconds, saved to a temp copy and opened read-only.
 
+With Turso credentials (Streamlit secrets or env vars TURSO_DATABASE_URL and
+TURSO_AUTH_TOKEN), the database is read from Turso instead of either file; the other files
+still come from the two places above.
+
 Every page reads through a read-only connection. Release/Reject is the only write: locally
 it goes through agent/release.py; in the cloud it starts review.yml (see dashboard/cloud.py)
 and never touches the database file.
@@ -20,8 +24,9 @@ from pathlib import Path
 import streamlit as st
 from streamlit.errors import StreamlitSecretNotFoundError
 
-from agent.config import PROJECT_ROOT, load_paths
-from agent.db import connect
+from agent import turso
+from agent.config import PROJECT_ROOT, load_paths, turso_credentials
+from agent.db import open_db
 from dashboard.cloud import contents_request, fetch_bytes
 
 CACHE_DIR = Path(tempfile.gettempdir()) / "farewatch-dashboard"
@@ -89,8 +94,21 @@ def read_only_connection(path_str: str) -> sqlite3.Connection:
     return conn
 
 
-def get_connection() -> sqlite3.Connection | None:
+def _turso_credentials() -> tuple[str, str] | None:
+    url, token = _secret("TURSO_DATABASE_URL"), _secret("TURSO_AUTH_TOKEN")
+    return (url, token) if url and token else turso_credentials()
+
+
+@st.cache_resource(show_spinner=False)
+def turso_connection(url: str, token: str) -> turso.Connection:
+    return turso.Connection(url, token)  # stateless HTTP, so one is safe to share across sessions
+
+
+def get_connection() -> sqlite3.Connection | turso.Connection | None:
     """None if there is no database yet -- pages show a friendly empty state."""
+    creds = _turso_credentials()
+    if creds:
+        return turso_connection(*creds)
     path = data_file("analytics.sqlite")
     return read_only_connection(str(path)) if path else None
 
@@ -99,4 +117,4 @@ def write_connection() -> sqlite3.Connection:
     """Read-write, local mode only, for Release/Reject."""
     if cloud_config() is not None:
         raise RuntimeError("the cloud app must not write the database; dispatch review.yml instead")
-    return connect(load_paths().sqlite)
+    return open_db(load_paths().sqlite)

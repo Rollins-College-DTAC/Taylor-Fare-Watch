@@ -33,6 +33,9 @@ jobs:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       ANTHROPIC_WORKSPACE_ID: ${{ secrets.ANTHROPIC_WORKSPACE_ID }}
       TYPESAFE_API_KEY: ${{ secrets.TYPESAFE_API_KEY }}
+      # Optional: with both set, the database and raw documents live in Turso, not on `data`.
+      TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
+      TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
       MINUTES: ${{ inputs.minutes || '5' }}
       FAREWATCH_KILL_SWITCH: ${{ inputs.kill_switch && '1' || '0' }}
     steps:

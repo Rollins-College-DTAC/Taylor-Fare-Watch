@@ -15,6 +15,11 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
+from tinydb import TinyDB
+
+from agent import turso
+from agent.config import turso_credentials
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS run_log (
   run_id TEXT, step TEXT, file_name TEXT, file_sha256 TEXT,
@@ -90,6 +95,24 @@ def connect(path: Path) -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL")  # the dashboard can read while the agent writes
     conn.executescript(SCHEMA)
     return conn
+
+
+def open_db(path: Path):
+    """Turso when TURSO_DATABASE_URL and TURSO_AUTH_TOKEN are set, otherwise the SQLite file
+    at `path`. Both answer execute/executescript/close the same way."""
+    creds = turso_credentials()
+    if creds is None:
+        return connect(path)
+    conn = turso.Connection(*creds)
+    conn.executescript(SCHEMA + turso.DOCS_SCHEMA)
+    return conn
+
+
+def open_raw_store(path: Path, conn):
+    """The raw (NoSQL) layer next to `conn`: Turso's `documents` table, or TinyDB at `path`."""
+    if isinstance(conn, turso.Connection):
+        return turso.DocStore(conn)
+    return TinyDB(path, encoding="utf-8", ensure_ascii=False, indent=1)
 
 
 def write_log(conn: sqlite3.Connection, table: str, row: dict) -> int:
