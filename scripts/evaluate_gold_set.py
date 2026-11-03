@@ -7,6 +7,8 @@ them to model_usage_log like any other run, under run_id run-goldset-<timestamp>
 Usage:
     python scripts/evaluate_gold_set.py                  # rules expert, free
     python scripts/evaluate_gold_set.py --expert claude   # live Claude calls
+    python scripts/evaluate_gold_set.py --expert clairic  # live Clairic extraction + Jev classification
+                                                          # (Sonnet escalates); .github/workflows/gold-set.yml runs this
 """
 
 from __future__ import annotations
@@ -15,6 +17,8 @@ import argparse
 import csv
 import json
 import sys
+from collections import Counter
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -120,16 +124,21 @@ def run_rules(records: list[dict]) -> list[tuple[QuoteExtraction | None, QuoteCl
 EVAL_DB_PATH = PROJECT_ROOT / "data" / "gold_set_eval.sqlite"
 
 
-def run_claude(records: list[dict]) -> list[tuple[QuoteExtraction | None, QuoteClassification]]:
+def run_claude(
+    records: list[dict], clairic: bool = False,
+) -> tuple[list[tuple[QuoteExtraction | None, QuoteClassification]], list[str]]:
     """Uses its own SQLite file, not data/analytics.sqlite: scoring runs must not share a
     daily token budget with the production agent, or repeated scoring passes silently start
     falling back to the rules expert mid-run once the shared budget is spent -- exactly what
-    happened the first time this ran against the production database."""
+    happened the first time this ran against the production database.
+
+    Also returns the reasons the score isn't clean in clairic mode: a Clairic/Jev score
+    must come from Clairic and Jev, not from their silent fallbacks to Claude."""
     from anthropic import Anthropic
 
     from agent.config import anthropic_client_kwargs
 
-    settings = load_settings()
+    settings = replace(load_settings(), clairic_enabled=clairic)
     if settings.kill_switch:
         sys.exit("config.toml kill_switch is on; turn it off to score the claude expert")
     client = Anthropic(**anthropic_client_kwargs())
@@ -137,6 +146,7 @@ def run_claude(records: list[dict]) -> list[tuple[QuoteExtraction | None, QuoteC
     run_id = f"run-goldset-{datetime.now(timezone.utc):%Y%m%dT%H%M%S}"
     out = []
     rules_fallback = 0
+    final_extractors = Counter()
     try:
         for i, record in enumerate(records):
             ctx = RunContext(conn, run_id, f"gold_set.csv#{i}")
@@ -145,20 +155,33 @@ def run_claude(records: list[dict]) -> list[tuple[QuoteExtraction | None, QuoteC
             note = str(redacted.get("seller_note") or redacted.get("note") or "")
             classification = claude_expert.run_classification(ctx, client, settings, note)
             out.append((extraction_result.data, classification))
+            final_extractors[f"{extraction_result.expert} ({extraction_result.outcome})"] += 1
             if extraction_result.expert == "rules":
                 rules_fallback += 1
+        calls = [dict(r) for r in conn.execute(
+            "SELECT task, expert, route_reason FROM model_usage_log WHERE run_id = ?", (run_id,))]
     finally:
         conn.close()
+    print("model calls:", ", ".join(f"{k}: {v}" for k, v in Counter(f"{c['task']}/{c['expert']}" for c in calls).most_common()))
+    problems = []
+    if clairic:
+        not_jev = sum(c["task"] == "classify" and c["expert"] != "jev" for c in calls)
+        no_clairic = sum("Clairic unavailable" in (c["route_reason"] or "") for c in calls)
+        if not_jev:
+            problems.append(f"{not_jev} classification(s) didn't come from Jev (is TYPESAFE_API_KEY set?)")
+        if no_clairic:
+            problems.append(f"{no_clairic} extraction(s) fell back from Clairic (are the CLOUDFLARE_* keys set?)")
+    print("final extractor per record:", ", ".join(f"{k}: {v}" for k, v in final_extractors.most_common()))
     if rules_fallback:
         print(f"warning: {rules_fallback} of {len(records)} records fell back to rules "
               f"(daily token budget exhausted in {EVAL_DB_PATH.name}) -- not a clean claude score")
-    return out
+    return out, problems
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--gold", type=Path, default=PROJECT_ROOT / "gold_set.csv")
-    parser.add_argument("--expert", choices=["rules", "claude"], default="rules")
+    parser.add_argument("--expert", choices=["rules", "claude", "clairic"], default="rules")
     args = parser.parse_args()
 
     if not args.gold.exists():
@@ -166,7 +189,11 @@ def main() -> None:
 
     gold_rows = load_gold(args.gold)
     records = [json.loads(row["record_json"]) for row in gold_rows]
-    predictions = run_claude(records) if args.expert == "claude" else run_rules(records)
+    problems = []
+    if args.expert == "rules":
+        predictions = run_rules(records)
+    else:
+        predictions, problems = run_claude(records, clairic=args.expert == "clairic")
 
     settings = load_settings()
     totals = {"correct": 0, "wrong": 0, "invented": 0, "missed": 0, "total": 0}
@@ -198,6 +225,8 @@ def main() -> None:
     if brier is not None:
         print(f"category Brier score (lower is better, 0 = perfect): {brier:.4f}")
 
+    if problems:
+        sys.exit("not a clean Clairic/Jev score, so it was not logged:\n- " + "\n- ".join(problems))
     log_gold_set_score(args.expert, n, field_accuracy, category_accuracy, injection_accuracy, brier, totals)
 
 

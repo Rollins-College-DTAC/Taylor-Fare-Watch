@@ -17,7 +17,7 @@ Task = Literal["classify", "extract", "escalate", "explain"]
 
 @dataclass(frozen=True)
 class RouteDecision:
-    expert: str  # "rules", "jev", or a model name from config
+    expert: str  # "rules", "jev", "clairic", or a model name from config
     reason: str
 
 
@@ -34,6 +34,8 @@ def route(task: Task, settings: Settings, tokens_used_today: int) -> RouteDecisi
             settings.extract_model, "Jev unavailable; asking the extractor the same questions"
         )
     if task == "extract":
+        if settings.clairic_enabled:
+            return RouteDecision("clairic", "Clairic reads every field in one pass with per-field confidence")
         return RouteDecision(settings.extract_model, "default extractor for free-text fields")
     if task == "escalate":
         return RouteDecision(

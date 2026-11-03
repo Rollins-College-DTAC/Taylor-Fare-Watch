@@ -1,0 +1,55 @@
+# Scores Clairic (extraction) and Jev (classification) on gold_set.csv whenever something
+# that changes their answers lands on main, or on demand. Live API calls: about $0.02 of
+# Clairic plus 50 Jev calls and any Sonnet escalations per run. The summary goes to
+# stats_log (method gold-set-clairic) for the Governance page; that needs the Turso secrets,
+# because without them the runner's local database is thrown away. A run where Clairic or
+# Jev fell back to Claude fails instead of logging a misleading score.
+name: gold-set
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "prompts/**"
+      - "config.toml"
+      - "agent/experts/**"
+      - "agent/models.py"
+      - "agent/reference.py"
+      - "gold_set.csv"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gold-set
+  cancel-in-progress: true   # only the newest commit's score matters
+
+jobs:
+  score:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      ANTHROPIC_WORKSPACE_ID: ${{ secrets.ANTHROPIC_WORKSPACE_ID }}
+      TYPESAFE_API_KEY: ${{ secrets.TYPESAFE_API_KEY }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      CLOUDFLARE_AUTH_TOKEN: ${{ secrets.CLOUDFLARE_AUTH_TOKEN }}
+      TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
+      TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
+      FAREWATCH_JEV_ENABLED: "1"
+      FAREWATCH_KILL_SWITCH: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --frozen
+
+      - name: Score Clairic + Jev on the gold set
+        run: |
+          set -o pipefail
+          uv run python scripts/evaluate_gold_set.py --expert clairic 2>&1 | tee score.txt
+
+      - name: Show the score on the run page
+        if: always()
+        run: |
+          { echo "### Gold set: Clairic extraction + Jev classification"; echo '```'; cat score.txt 2>/dev/null || echo "no output"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"

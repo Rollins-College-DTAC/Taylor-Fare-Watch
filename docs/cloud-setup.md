@@ -24,6 +24,8 @@ repository.
    | `ANTHROPIC_API_KEY` | Your class Claude Console key |
    | `ANTHROPIC_WORKSPACE_ID` | Your Console workspace ID (only if your key needs it) |
    | `TYPESAFE_API_KEY` | Your Jev key from console.typesafe.ai/keys (optional; without it Claude classifies) |
+   | `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_AUTH_TOKEN` | Clairic (Workers AI) account ID and token (optional; extraction with `clairic_enabled = true`, and the `gold-set` workflow) |
+   | `TURSO_DATABASE_URL`, `TURSO_AUTH_TOKEN` | Turso database URL and full-access token (optional; the database then lives in Turso instead of the `data` branch, and `gold-set` scores reach the Governance page) |
 
 5. Settings -> Actions -> General -> Workflow permissions: **Read and write permissions**
    (the pipeline pushes the `data` branch with the built-in token).

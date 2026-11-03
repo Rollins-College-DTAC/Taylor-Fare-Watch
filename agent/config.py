@@ -88,10 +88,12 @@ class Settings:
     departure_year: int
     departure_month: int
     jev_model: str = "jev-latest"
+    clairic_enabled: bool = False
 
 
 def load_settings(path: Path | None = None) -> Settings:
-    """config.toml, with FAREWATCH_KILL_SWITCH and FAREWATCH_JEV_ENABLED env overrides."""
+    """config.toml, with FAREWATCH_KILL_SWITCH, FAREWATCH_JEV_ENABLED and FAREWATCH_CLAIRIC_ENABLED
+    env overrides."""
     path = path or Path(os.environ.get("FAREWATCH_CONFIG", PROJECT_ROOT / "config.toml"))
     cfg = tomllib.loads(path.read_text(encoding="utf-8"))
     models, prompts, limits, ref = cfg["models"], cfg["prompts"], cfg["limits"], cfg["reference"]
@@ -109,4 +111,5 @@ def load_settings(path: Path | None = None) -> Settings:
         departure_year=ref["departure_year"],
         departure_month=ref["departure_month"],
         jev_model=models["jev"],
+        clairic_enabled=_flag("FAREWATCH_CLAIRIC_ENABLED", models.get("clairic_enabled", False)),
     )

@@ -21,15 +21,16 @@ from pydantic import ValidationError
 
 from agent.config import PROMPTS_DIR, Settings
 from agent.db import RunContext, now_utc, tokens_used_today, write_log
-from agent.experts import jev_expert, rules
+from agent.experts import clairic_expert, jev_expert, rules
 from agent.models import QuoteClassification, QuoteExtraction, choice_confidence
-from agent.router import route
+from agent.router import RouteDecision, route
 from agent.stats import StatResult
 
 # Rough per-million-token estimates for the log, not what the class Console actually bills.
 PRICE_PER_MTOK_USD = {
     "claude-haiku-4-5": {"input": 1.00, "output": 5.00},
     "claude-sonnet-5-5": {"input": 3.00, "output": 15.00},
+    clairic_expert.MODEL: {"input": 0.10, "output": 0.0},  # Workers AI bills input tokens only
 }
 
 
@@ -126,8 +127,12 @@ def _try_extract(
     ctx: RunContext, client: Anthropic, settings: Settings, expert: str, reason: str,
     record: dict, record_text: str, error_hint: str | None = None,
 ) -> tuple[QuoteExtraction | None, str | None]:
-    """One extraction attempt. Returns (result, error) -- exactly one is None."""
-    prompt_version = _prompt_version(settings.extract_prompt)
+    """One extraction attempt. Returns (result, error) -- exactly one is None. Raises
+    ClairicUnavailable when Clairic can't be reached, so the caller can fall back."""
+    if expert == clairic_expert.MODEL:
+        prompt_version = clairic_expert.FIELDS_VERSION
+    else:
+        prompt_version = _prompt_version(settings.extract_prompt)
     if expert == "rules":
         data = rules.extract(record)
         in_tok = out_tok = latency = 0
@@ -136,6 +141,10 @@ def _try_extract(
         cached = _cached(ctx, key)
         if cached:
             data, in_tok, out_tok, latency = cached["data"], cached["input_tokens"], cached["output_tokens"], 0
+        elif expert == clairic_expert.MODEL:
+            reply = clairic_expert.extract(record, record_text, settings)
+            data, in_tok, out_tok, latency = reply.data, reply.input_tokens, 0, reply.latency_ms
+            _store_cache(ctx, key, "extract", expert, prompt_version, data, in_tok, out_tok)
         else:
             prompt = _extract_prompt(record_text, settings.extract_prompt)
             if error_hint:
@@ -175,7 +184,11 @@ def run_extraction(ctx: RunContext, client: Anthropic, settings: Settings, recor
     decision = route("extract", settings, tokens_used_today(ctx.conn))
     record_text = json.dumps(record, ensure_ascii=False, sort_keys=True)
 
-    extraction, error = _try_extract(ctx, client, settings, decision.expert, decision.reason, record, record_text)
+    try:
+        extraction, error = _try_extract(ctx, client, settings, decision.expert, decision.reason, record, record_text)
+    except clairic_expert.ClairicUnavailable as exc:
+        decision = RouteDecision(settings.extract_model, f"Clairic unavailable ({exc}); falling back to the extractor")
+        extraction, error = _try_extract(ctx, client, settings, decision.expert, decision.reason, record, record_text)
     if decision.expert == "rules":
         return ExtractionResult(extraction, "quarantined" if error else "valid", "rules")
 

@@ -7,3 +7,5 @@ def no_real_turso(monkeypatch):
     database. Tests always start on local files; tests/test_turso.py sets its own fake server."""
     monkeypatch.delenv("TURSO_DATABASE_URL", raising=False)
     monkeypatch.delenv("TURSO_AUTH_TOKEN", raising=False)
+    monkeypatch.delenv("CLOUDFLARE_ACCOUNT_ID", raising=False)  # and never a live Clairic call
+    monkeypatch.delenv("CLOUDFLARE_AUTH_TOKEN", raising=False)
