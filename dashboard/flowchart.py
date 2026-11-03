@@ -7,6 +7,8 @@ string for st.graphviz_chart.
 
 from __future__ import annotations
 
+from datetime import datetime
+
 STEPS = ["detect", "land", "redact", "classify", "extract", "validate", "load", "decide", "act"]
 STEP_LABELS = {
     "detect": "Detect", "land": "Land (TinyDB)", "redact": "Redact", "classify": "Classify",
@@ -16,6 +18,7 @@ STATUS_COLORS = {
     None: "#D9D9D9", "running": "#4C72B0", "ok": "#55A868", "held": "#DD8452",
     "warning": "#DD8452", "failed": "#C44E52",
 }
+REPLAY_STEP_SECONDS = 15  # how long the cloud replay shows each step, slow enough to narrate
 TEXT_COLORS = {None: "black", "running": "white", "ok": "white", "held": "black", "warning": "black", "failed": "white"}
 
 
@@ -23,9 +26,27 @@ def _escape(text: str) -> str:
     return text.replace('"', "'").replace("\n", " ")
 
 
+def step_seconds(row: dict) -> int | None:
+    """Whole seconds from started_at to finished_at (the logs keep second precision)."""
+    if not (row.get("started_at") and row.get("finished_at")):
+        return None
+    delta = datetime.fromisoformat(row["finished_at"]) - datetime.fromisoformat(row["started_at"])
+    return int(delta.total_seconds())
+
+
 def _step_label(step: str, row: dict | None) -> str:
     label = STEP_LABELS[step]
-    if row and row.get("message"):
+    if not row or row.get("status") == "running":  # numbers appear once the step finishes
+        return label
+    if row.get("rows_in") is not None:
+        counts = f"{row['rows_in']} in, {row.get('rows_out') or 0} out"
+        if row.get("rows_rejected"):
+            counts += f", {row['rows_rejected']} rejected"
+        label += f"\\n{counts}"
+    seconds = step_seconds(row)
+    if seconds is not None:
+        label += f"\\n{seconds} s" if seconds else "\\n<1 s"
+    if row.get("message"):
         label += f"\\n{_escape(row['message'])[:50]}"
     return label
 
@@ -78,3 +99,10 @@ def replay_frame(step_rows: dict[str, dict], outcome: str | None, tick: int) -> 
     rows = {s: step_rows[s] for s in present[:shown]}
     rows[present[shown]] = {**step_rows[present[shown]], "status": "running", "message": None}
     return rows, None
+
+
+def current_step(chart_rows: dict[str, dict]) -> str | None:
+    """The step a viewer is watching: the running one, else the last one shown."""
+    present = [s for s in STEPS if s in chart_rows]
+    running = [s for s in present if chart_rows[s].get("status") == "running"]
+    return (running or present or [None])[-1]

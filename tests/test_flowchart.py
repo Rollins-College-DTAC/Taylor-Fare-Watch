@@ -1,4 +1,4 @@
-from dashboard.flowchart import STEPS, build_flow_dot, replay_frame
+from dashboard.flowchart import STEPS, build_flow_dot, current_step, replay_frame
 
 
 def test_every_step_appears_as_a_node():
@@ -58,3 +58,21 @@ def test_replay_reveals_one_step_per_tick_then_the_outcome():
     full, outcome = replay_frame(rows, "publish", tick=3)
     assert full == rows and outcome == "publish"
     assert replay_frame(rows, "publish", tick=5)[0] == first  # wraps around
+
+
+def test_finished_box_shows_counts_and_duration():
+    row = {"status": "ok", "rows_in": 8, "rows_out": 7, "rows_rejected": 1, "message": "done",
+           "started_at": "2026-11-03T20:00:00+00:00", "finished_at": "2026-11-03T20:00:03+00:00"}
+    dot = build_flow_dot({"extract": row}, outcome=None)
+    assert "8 in, 7 out, 1 rejected\\n3 s\\ndone" in dot
+
+
+def test_running_box_shows_only_its_name():
+    dot = build_flow_dot({"land": {"status": "running", "rows_in": 8, "message": "x"}}, outcome=None)
+    assert 'land [label="Land (TinyDB)",' in dot
+
+
+def test_current_step_is_the_running_one_else_the_last_shown():
+    assert current_step({"detect": {"status": "ok"}, "land": {"status": "running"}}) == "land"
+    assert current_step({"detect": {"status": "ok"}, "act": {"status": "ok"}}) == "act"
+    assert current_step({}) is None

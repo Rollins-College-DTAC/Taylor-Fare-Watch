@@ -16,7 +16,15 @@ import streamlit as st  # noqa: E402
 from agent.release import DECISIONS, ReleaseError, list_held, resolve  # noqa: E402
 from dashboard.cloud import REVIEW_WORKFLOW, passcode_ok, send_dispatch, workflow_dispatch_request  # noqa: E402
 from dashboard.db import CloudConfig, cloud_config, get_connection, write_connection  # noqa: E402
-from dashboard.flowchart import STEPS, build_flow_dot, replay_frame  # noqa: E402
+from dashboard.flowchart import (  # noqa: E402
+    REPLAY_STEP_SECONDS,
+    STEP_LABELS,
+    STEPS,
+    build_flow_dot,
+    current_step,
+    replay_frame,
+    step_seconds,
+)
 from dashboard.fmt import md  # noqa: E402
 from dashboard.live_run import (  # noqa: E402
     decision_outcome_for_run,
@@ -74,8 +82,9 @@ def live_section() -> None:
         finished = max((r["finished_at"] for r in step_rows.values() if r.get("finished_at")), default=None)
         if finished:
             ago = int((datetime.now(timezone.utc) - datetime.fromisoformat(finished)).total_seconds())
-            st.caption(f"Replay. This run finished at {finished} UTC, {ago} seconds ago.")
-        chart_rows, chart_outcome = replay_frame(step_rows, outcome, int(time.time() // 5))
+            st.caption(f"Replay, {REPLAY_STEP_SECONDS} seconds per step. This run finished at {finished} UTC, "
+                       f"{ago} seconds ago.")
+        chart_rows, chart_outcome = replay_frame(step_rows, outcome, int(time.time() // REPLAY_STEP_SECONDS))
     else:
         chart_rows, chart_outcome = step_rows, outcome
     st.graphviz_chart(build_flow_dot(chart_rows, chart_outcome), use_container_width=True)
@@ -84,28 +93,54 @@ def live_section() -> None:
     model_calls = model_calls_for_run(conn, run_id)
     stat = stat_for_run(conn, run_id)
 
+    now = current_step(chart_rows)
+    if now:
+        present = [s for s in STEPS if s in step_rows]
+        heading = f"Now showing: {STEP_LABELS[now]} (step {present.index(now) + 1} of {len(present)})"
+        if CLOUD:
+            heading += f", next step in {REPLAY_STEP_SECONDS - int(time.time() % REPLAY_STEP_SECONDS)} s"
+        with st.container(border=True):
+            st.markdown(f"#### {heading}")
+            _render_step_detail(now, step_rows[now], file_name, sql_log, model_calls, stat)
+
+    st.markdown("##### Every step of this run")
     for step in STEPS:
         row = step_rows.get(step)
         if row is None:
             continue
         with st.expander(md(f"{step.capitalize()} -- {row['status']} -- {row['message'] or ''}")):
-            st.write(f"{STEP_DESCRIPTIONS.get(step, '')} File: `{file_name}`")
-            step_sql = [r for r in sql_log if r["step"] == step]
-            for r in step_sql:
-                st.code(r["sql_text"], language="sql")
-                st.caption(md(f"params: {r['params_json']}  |  {r['rows_affected']} row(s)  |  {r['duration_ms']} ms"))
-            step_calls = [r for r in model_calls if r["step"] == step]
-            if step_calls:
-                st.dataframe(
-                    [{"task": r["task"], "expert": r["expert"], "reason": r["route_reason"],
-                      "confidence": r["confidence"], "tokens": (r["input_tokens"] or 0) + (r["output_tokens"] or 0),
-                      "cost_usd": r["estimated_cost_usd"], "outcome": r["outcome"]} for r in step_calls],
-                    hide_index=True,
-                )
-            if step == "classify" and step_calls:
-                st.latex(r"\mathrm{confidence} = \frac{p_{\max} - 1/n}{1 - 1/n}")
-            if step == "decide":
-                _render_decide(stat)
+            _render_step_detail(step, row, file_name, sql_log, model_calls, stat)
+
+
+def _render_step_detail(
+    step: str, row: dict, file_name: str, sql_log: list[dict], model_calls: list[dict], stat: dict | None,
+) -> None:
+    """What one step did: its purpose, counts and timing, status message, SQL and model calls."""
+    st.write(f"{STEP_DESCRIPTIONS.get(step, '')} File: `{file_name}`")
+    seconds = step_seconds(row)
+    cols = st.columns(4)
+    cols[0].metric("Rows in", row["rows_in"] if row["rows_in"] is not None else "-")
+    cols[1].metric("Rows out", row["rows_out"] if row["rows_out"] is not None else "-")
+    cols[2].metric("Rejected", row["rows_rejected"] or 0)
+    cols[3].metric("Duration", "-" if seconds is None else (f"{seconds} s" if seconds else "<1 s"))
+    if row["message"]:
+        st.write(md(f"**{row['status']}:** {row['message']}"))
+    step_sql = [r for r in sql_log if r["step"] == step]
+    for r in step_sql:
+        st.code(r["sql_text"], language="sql")
+        st.caption(md(f"params: {r['params_json']}  |  {r['rows_affected']} row(s)  |  {r['duration_ms']} ms"))
+    step_calls = [r for r in model_calls if r["step"] == step]
+    if step_calls:
+        st.dataframe(
+            [{"task": r["task"], "expert": r["expert"], "reason": r["route_reason"],
+              "confidence": r["confidence"], "tokens": (r["input_tokens"] or 0) + (r["output_tokens"] or 0),
+              "cost_usd": r["estimated_cost_usd"], "outcome": r["outcome"]} for r in step_calls],
+            hide_index=True,
+        )
+    if step == "classify" and step_calls:
+        st.latex(r"\mathrm{confidence} = \frac{p_{\max} - 1/n}{1 - 1/n}")
+    if step == "decide":
+        _render_decide(stat)
 
 
 def _render_decide(stat: dict | None) -> None:
