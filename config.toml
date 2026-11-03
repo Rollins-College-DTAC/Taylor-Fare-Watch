@@ -16,7 +16,7 @@ jev_questions = "jev_questions_v1.json"
 [limits]
 kill_switch = false               # true: no model calls at all, rules only
 max_tokens_per_run = 20000        # one import file
-max_tokens_per_day = 400000
+max_tokens_per_day = 1000000
 category_confidence_min = 0.6     # below this, the record goes to the review queue
 
 [reference]
